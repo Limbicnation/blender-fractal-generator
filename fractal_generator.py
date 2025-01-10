@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Fractal Geometry Generator",
     "author": "Your Name",
-    "version": (0, 1, 0),  # Changed to 0.1.0 to reflect WIP status
-    "blender": (3, 6, 0),
+    "version": (0, 1, 0),
+    "blender": (4, 3, 2 ),
     "location": "View3D > Sidebar > Fractal",
     "description": "[WIP] Generate fractal-based geometry modifications",
     "warning": "Experimental - Use with caution",
@@ -56,9 +56,10 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         box.label(text="⚠️ Work in Progress", icon='ERROR')
         box.label(text="Save your work before using")
         
-        # Performance Settings
+        # Face Selection Settings
         box = layout.box()
-        box.label(text="Performance Settings")
+        box.label(text="Face Selection")
+        box.prop(scene, "fractal_selected_only")
         box.prop(scene, "fractal_face_limit")
         box.prop(scene, "fractal_batch_size")
         
@@ -90,9 +91,14 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return (context.active_object is not None and 
-                context.active_object.type == 'MESH' and
-                not context.window_manager.fractal_is_processing)
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH' or context.window_manager.fractal_is_processing:
+            return False
+        # If selected faces only is enabled, require face selections in edit mode
+        if context.scene.fractal_selected_only:
+            return (obj.mode == 'EDIT' and 
+                   bool(context.edit_object.data.total_face_sel))
+        return True
 
     def modal(self, context, event):
         if event.type == 'ESC' or context.window_manager.fractal_should_cancel:
@@ -111,7 +117,15 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         batch = self.face_batches[batch_idx]
         scene = context.scene
         
+        # Ensure we're in edit mode for BMesh operations
+        if context.active_object.mode != 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+            
         for face in batch:
+            # Skip invalid faces
+            if not face.is_valid:
+                continue
+                
             center = face.calc_center_median()
             fractal_value = calculate_fractal_value(
                 center.x * scene.fractal_scale,
@@ -181,14 +195,30 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             context.window_manager.fractal_should_cancel = False
             
             # Setup bmesh
-            bpy.ops.object.mode_set(mode='EDIT')
+            was_in_edit_mode = (obj.mode == 'EDIT')
+            if not was_in_edit_mode:
+                bpy.ops.object.mode_set(mode='EDIT')
+            
             self.mesh = obj.data
             self.bm = bmesh.from_edit_mesh(self.mesh)
+            self.bm.faces.ensure_lookup_table()  # Ensure face indices are valid
+            
+            # Get faces based on selection mode
+            if scene.fractal_selected_only:
+                available_faces = [f for f in self.bm.faces if f.select]
+            else:
+                available_faces = self.bm.faces[:]
             
             # Select faces within limit
-            num_faces = len(self.bm.faces)
+            num_faces = len(available_faces)
             face_limit = min(scene.fractal_face_limit, num_faces)
-            selected_faces = random.sample(self.bm.faces[:], k=face_limit)
+            
+            if scene.fractal_selected_only:
+                # Use all selected faces up to the limit
+                selected_faces = available_faces[:face_limit]
+            else:
+                # Randomly sample from all faces
+                selected_faces = random.sample(available_faces, k=face_limit)
             
             # Create batches
             self.face_batches = [
@@ -241,6 +271,13 @@ class MESH_OT_fractal_cancel(bpy.types.Operator):
 def register_properties():
     bpy.types.WindowManager.fractal_is_processing = BoolProperty(default=False)
     bpy.types.WindowManager.fractal_should_cancel = BoolProperty(default=False)
+    
+    # Add new property for selected faces only
+    bpy.types.Scene.fractal_selected_only = BoolProperty(
+        name="Selected Faces Only",
+        description="Apply fractal only to selected faces",
+        default=False
+    )
     
     bpy.types.Scene.fractal_face_limit = IntProperty(
         name="Face Limit",
@@ -313,11 +350,16 @@ def register_properties():
 def unregister_properties():
     del bpy.types.WindowManager.fractal_is_processing
     del bpy.types.WindowManager.fractal_should_cancel
+    del bpy.types.Scene.fractal_selected_only
     del bpy.types.Scene.fractal_face_limit
     del bpy.types.Scene.fractal_batch_size
     del bpy.types.Scene.fractal_iterations
     del bpy.types.Scene.fractal_scale
     del bpy.types.Scene.fractal_min_depth
+    del bpy.types.Scene.fractal_inset_depth
+    del bpy.types.Scene.fractal_secondary_inset
+    del bpy.types.Scene.fractal_extrusion_strength
+    del bpy.types.Scene.fractal_recursion_chance
 
 classes = (
     FRACTAL_PT_main_panel,
