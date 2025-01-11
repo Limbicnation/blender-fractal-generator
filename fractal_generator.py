@@ -2,7 +2,7 @@ bl_info = {
     "name": "Fractal Geometry Generator",
     "author": "Your Name",
     "version": (0, 1, 0),
-    "blender": (4, 3, 2 ),
+    "blender": (3, 6, 0),
     "location": "View3D > Sidebar > Fractal",
     "description": "[WIP] Generate fractal-based geometry modifications",
     "warning": "Experimental - Use with caution",
@@ -66,6 +66,7 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         # Main Settings
         box = layout.box()
         box.label(text="Fractal Settings")
+        box.prop(scene, "fractal_random_seed")
         box.prop(scene, "fractal_iterations")
         box.prop(scene, "fractal_scale")
         box.prop(scene, "fractal_min_depth")
@@ -190,6 +191,13 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             obj = context.active_object
             scene = context.scene
             
+            # Set random seed
+            seed_value = scene.fractal_random_seed
+            if seed_value == 0:  # Use system time for true random
+                random.seed(None)
+            else:
+                random.seed(seed_value)
+            
             # Initialize processing state
             context.window_manager.fractal_is_processing = True
             context.window_manager.fractal_should_cancel = False
@@ -272,6 +280,15 @@ def register_properties():
     bpy.types.WindowManager.fractal_is_processing = BoolProperty(default=False)
     bpy.types.WindowManager.fractal_should_cancel = BoolProperty(default=False)
     
+    # Random seed property
+    bpy.types.Scene.fractal_random_seed = IntProperty(
+        name="Random Seed",
+        description="Seed value for random pattern generation (0 for true random)",
+        default=0,
+        min=0,
+        max=9999
+    )
+    
     # Add new property for selected faces only
     bpy.types.Scene.fractal_selected_only = BoolProperty(
         name="Selected Faces Only",
@@ -351,6 +368,7 @@ def unregister_properties():
     del bpy.types.WindowManager.fractal_is_processing
     del bpy.types.WindowManager.fractal_should_cancel
     del bpy.types.Scene.fractal_selected_only
+    del bpy.types.Scene.fractal_random_seed
     del bpy.types.Scene.fractal_face_limit
     del bpy.types.Scene.fractal_batch_size
     del bpy.types.Scene.fractal_iterations
