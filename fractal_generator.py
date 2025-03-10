@@ -167,6 +167,10 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         # Randomize Seed Button
         row = layout.row(align=True)
         row.operator("mesh.fractal_randomize_seed", text="Randomize Seed", icon='FILE_REFRESH')
+        
+        # Reset to Defaults Button
+        row = layout.row(align=True)
+        row.operator("mesh.fractal_reset_defaults", text="Reset to Defaults", icon='LOOP_BACK')
 
         # Basic Settings
         box = layout.box()
@@ -226,6 +230,42 @@ class MESH_OT_fractal_randomize_seed(bpy.types.Operator):
         new_seed = int((time.time() * 1000) % 10000) + 1
         context.scene.fractal_seed = new_seed
         self.report({'INFO'}, f"New random seed: {new_seed}")
+        return {'FINISHED'}
+
+class MESH_OT_fractal_reset_defaults(bpy.types.Operator):
+    bl_idname = "mesh.fractal_reset_defaults"
+    bl_label = "Reset to Defaults"
+    bl_description = "Reset all fractal generator settings to their default values"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        scene = context.scene
+        
+        # Reset basic properties
+        scene.fractal_iterations = 50
+        scene.fractal_scale = 1.5
+        scene.fractal_complexity = 0.5
+        scene.fractal_seed = 1
+        scene.fractal_type = 'MANDELBROT'
+        
+        # Reset stepping pattern properties
+        scene.fractal_extrude_along_normal = True
+        scene.fractal_use_individual_normals = True
+        scene.fractal_inset_amount = 0.3
+        scene.fractal_inset_depth = 0.0
+        scene.fractal_inset_relative = True
+        scene.fractal_inset_edges_only = False
+        scene.fractal_second_extrude_factor = 0.7
+        scene.fractal_first_extrude_amount = 0.5
+        
+        # Reset other properties
+        scene.use_smooth_shading = False
+        scene.fractal_selected_only = True
+        scene.fractal_face_limit = 500
+        scene.fractal_batch_processing = True
+        scene.fractal_batch_size = DEFAULT_BATCH_SIZE
+        
+        self.report({'INFO'}, "Fractal settings reset to defaults")
         return {'FINISHED'}
 
 class MESH_OT_fractal_cancel(bpy.types.Operator):
@@ -958,6 +998,7 @@ classes = (
     FRACTAL_PT_main_panel,
     MESH_OT_fractal_generate,
     MESH_OT_fractal_randomize_seed,
+    MESH_OT_fractal_reset_defaults,
     MESH_OT_fractal_cancel,
 )
 
