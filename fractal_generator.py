@@ -921,6 +921,12 @@ def register_properties():
     )
 
 def unregister_properties():
+    """Unregister properties associated with the fractal generator.
+    
+    This function removes all custom properties related to the fractal generation
+    from the Blender WindowManager and Scene types. This includes properties for
+    processing state, fractal configuration, and safety limits.
+    """
     # Remove window manager properties
     del bpy.types.WindowManager.fractal_is_processing
     del bpy.types.WindowManager.fractal_should_cancel
@@ -932,15 +938,21 @@ def unregister_properties():
     del bpy.types.Scene.fractal_complexity
     del bpy.types.Scene.fractal_seed
     del bpy.types.Scene.fractal_type
-    del bpy.types.Scene.fractal_pattern_type
-    del bpy.types.Scene.fractal_inset_amount
-    del bpy.types.Scene.fractal_inset_depth
-    del bpy.types.Scene.fractal_second_extrude_factor
     del bpy.types.Scene.use_smooth_shading
     del bpy.types.Scene.fractal_selected_only
     del bpy.types.Scene.fractal_face_limit
     del bpy.types.Scene.fractal_batch_processing
     del bpy.types.Scene.fractal_batch_size
+    
+    # Remove pattern-specific properties
+    del bpy.types.Scene.fractal_inset_amount
+    del bpy.types.Scene.fractal_inset_depth
+    del bpy.types.Scene.fractal_inset_relative
+    del bpy.types.Scene.fractal_inset_edges_only
+    del bpy.types.Scene.fractal_second_extrude_factor
+    del bpy.types.Scene.fractal_first_extrude_amount
+    del bpy.types.Scene.fractal_extrude_along_normal
+    del bpy.types.Scene.fractal_use_individual_normals
 
 classes = (
     FRACTAL_PT_main_panel,
