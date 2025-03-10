@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Advanced Fractal Geometry Generator",
     "author": "Your Name",
-    "version": (1, 2),
+    "version": (1, 3),
     "blender": (4, 3, 0),
     "location": "View3D > Sidebar > Fractal",
     "description": "Generate fractal-based geometry modifications including 3D fractals",
@@ -16,6 +16,7 @@ import random
 import math
 import time
 import traceback
+import cmath
 from mathutils import Vector
 from bpy.props import (
     FloatProperty,
@@ -25,10 +26,47 @@ from bpy.props import (
     BoolProperty
 )
 
+# Helper functions
+
+def safe_value(value, default, min_val=None, max_val=None):
+    """Safely clamp a value within bounds to prevent instability"""
+    if value is None or math.isnan(value) or math.isinf(value):
+        return default
+        
+    result = value
+    if min_val is not None:
+        result = max(min_val, result)
+    if max_val is not None:
+        result = min(max_val, result)
+    return result
+
+def check_system_resources():
+    """Check if system has enough resources to continue processing - with graceful fallback"""
+    # Try to use psutil if available, but continue without it if not installed
+    try:
+        import psutil
+        
+        # Check available memory (at least 500MB free)
+        try:
+            mem = psutil.virtual_memory()
+            if mem.available < 500 * 1024 * 1024:  # 500MB in bytes
+                return False, "Low memory"
+        except Exception as e:
+            debug_print(f"Memory check error: {e}")
+            pass  # Continue even if memory check fails
+            
+        return True, ""
+        
+    except ImportError:
+        debug_print("psutil module not available - skipping resource check")
+        # If psutil is not available, just return safe to continue
+        return True, ""
+
 # Global constants for safety
 MAX_ALLOWED_FACES = 10000  # Prevents processing too many faces at once
 DEFAULT_BATCH_SIZE = 500  # Process faces in batches to avoid memory spikes
 DEBUG = False  # Set to True for additional console output
+MAX_SAFE_VERTICES = 1000000  # Maximum vertex count to prevent crashes
 
 def debug_print(message):
     """Print debug messages to console if DEBUG is enabled"""
@@ -102,7 +140,7 @@ def get_selected_faces_431(obj, max_faces=MAX_ALLOWED_FACES):
         
         # Apply maximum face limit for safety
         if max_faces > 0 and len(selected_faces) > max_faces:
-            debug_print(f"Limiting selection from {len(selected_faces)} to {max_faces} faces")
+            debug_print(f"Limiting selection from {len(selected_faces)} to {max_faces}")
             selected_faces = selected_faces[:max_faces]
         
         # Log final result
@@ -181,6 +219,17 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         box.prop(scene, "fractal_selected_only")
         box.prop(scene, "fractal_face_limit")
         
+        # Fractal-specific settings
+        if scene.fractal_type in ['JULIA', 'JULIA_CUBIC', 'JULIA_QUARTIC', 'JULIA_QUINTIC']:
+            box = layout.box()
+            box.label(text="Julia Set Parameters", icon='FORCE_HARMONIC')
+            box.prop(scene, "fractal_julia_seed_real")
+            box.prop(scene, "fractal_julia_seed_imag")
+            
+            # Show the exponent control based on Julia set type
+            if scene.fractal_type == 'JULIA':
+                box.prop(scene, "fractal_power", text="Power (Z^n)")
+            
         # Stepping Pattern Settings
         box = layout.box()
         box.label(text="Stepping Pattern Settings", icon='MOD_ARRAY')
@@ -211,6 +260,7 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         box.prop(scene, "fractal_iterations")
         box.prop(scene, "fractal_seed")
         box.prop(scene, "use_smooth_shading")
+        box.prop(scene, "use_symmetry")
         
         # Safety Settings
         box = layout.box()
@@ -229,6 +279,23 @@ class MESH_OT_fractal_randomize_seed(bpy.types.Operator):
         # Generate a new random seed
         new_seed = int((time.time() * 1000) % 10000) + 1
         context.scene.fractal_seed = new_seed
+        
+        # Also randomize Julia set seed if that fractal type is selected
+        if context.scene.fractal_type in ['JULIA', 'JULIA_CUBIC', 'JULIA_QUARTIC', 'JULIA_QUINTIC']:
+            # Generate interesting Julia set parameters
+            # Values near the edge of the Mandelbrot set often produce interesting Julia sets
+            real = random.uniform(-1.0, 1.0)
+            imag = random.uniform(-1.0, 1.0)
+            
+            # Make sure it's not too far outside the Mandelbrot set
+            # (values too far outside tend to produce less interesting Julia sets)
+            while real*real + imag*imag > 2.0:
+                real = random.uniform(-1.0, 1.0)
+                imag = random.uniform(-1.0, 1.0)
+                
+            context.scene.fractal_julia_seed_real = real
+            context.scene.fractal_julia_seed_imag = imag
+        
         self.report({'INFO'}, f"New random seed: {new_seed}")
         return {'FINISHED'}
 
@@ -248,6 +315,11 @@ class MESH_OT_fractal_reset_defaults(bpy.types.Operator):
         scene.fractal_seed = 1
         scene.fractal_type = 'MANDELBROT'
         
+        # Reset Julia set properties
+        scene.fractal_julia_seed_real = -0.8
+        scene.fractal_julia_seed_imag = 0.156
+        scene.fractal_power = 2
+        
         # Reset stepping pattern properties
         scene.fractal_extrude_along_normal = True
         scene.fractal_use_individual_normals = True
@@ -260,6 +332,7 @@ class MESH_OT_fractal_reset_defaults(bpy.types.Operator):
         
         # Reset other properties
         scene.use_smooth_shading = False
+        scene.use_symmetry = True
         scene.fractal_selected_only = True
         scene.fractal_face_limit = 500
         scene.fractal_batch_processing = True
@@ -301,8 +374,51 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 context.active_object.type == 'MESH' and 
                 not getattr(context.window_manager, 'fractal_is_processing', False))
 
+    def check_operation_safety(self):
+        """Check if the operation is safe to continue"""
+        # Check if we've been processing too long
+        if time.time() - self.start_time > 120:  # 2 minute limit
+            self.report({'WARNING'}, "Operation taking too long - automatically cancelled")
+            return False
+        
+        # Check if we have too many vertices
+        if self.bm and len(self.bm.verts) > MAX_SAFE_VERTICES:
+            self.report({'WARNING'}, f"Too many vertices created ({len(self.bm.verts)}), stopping for safety")
+            return False
+            
+        # Check memory usage if psutil is available
+        try:
+            is_safe, reason = check_system_resources()
+            if not is_safe:
+                self.report({'WARNING'}, f"Operation cancelled: {reason}")
+                return False
+        except Exception as e:
+            # If resource check itself fails, log but continue
+            debug_print(f"Resource check error: {e}")
+            
+        return True
+
+    def calculate_safe_iterations(self, scale):
+        """Calculate safe iteration count based on zoom scale"""
+        # More iterations needed at deeper zoom levels
+        base_iterations = 50
+        zoom_factor = math.log(1/scale) if scale > 0 else 0
+        return min(base_iterations + int(zoom_factor * 20), 1000)
+    
+    def apply_symmetry(self, fractal_type, power=2):
+        """Determine symmetry properties for different fractal types"""
+        if fractal_type == 'MANDELBROT':
+            # Mandelbrot set has conjugate symmetry (mirror across x-axis)
+            return {'symmetry_type': 'MIRROR_X', 'fold': 2}
+        elif fractal_type.startswith('JULIA'):
+            # Julia sets have n-fold rotational symmetry where n is the power
+            return {'symmetry_type': 'ROTATIONAL', 'fold': power}
+        else:
+            # Default case
+            return {'symmetry_type': 'NONE', 'fold': 1}
+
     def process_complex_pattern(self, face, fractal_value, scene):
-        """Process a face with extrude → insert → extrude pattern - the core of the fractal stepping effect"""
+        """Process a face with extrude → insert → extrude pattern - with enhanced safety"""
         try:
             # Skip if face is not valid
             if not validate_face(face):
@@ -312,6 +428,15 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             if fractal_value < 0.1:
                 return False
                 
+            # Calculate face area and skip extremely small faces
+            face_area = face.calc_area()
+            if face_area < 0.00001:
+                return False
+                
+            # Skip faces with too many vertices
+            if len(face.verts) > 50:  # Reduced from 100 for better stability
+                return False
+                
             face_normal = face.normal.copy()
             if face_normal.length < 0.001:
                 # Use global Z if normal is invalid
@@ -319,112 +444,136 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             else:
                 face_normal.normalize()
                 
-            # --- STEP 1: FIRST EXTRUSION ---
+            # --- STEP 1: FIRST EXTRUSION with safety limits ---
             # Extrude the face
             result = bmesh.ops.extrude_face_region(self.bm, geom=[face])
             
             # Get newly created geometry
-            new_geom = result["geom"]
+            new_geom = result.get("geom", [])
+            if not new_geom:  # Safety check
+                return False
+                
             new_faces = [g for g in new_geom if isinstance(g, bmesh.types.BMFace)]
             new_verts = [g for g in new_geom if isinstance(g, bmesh.types.BMVert)]
             
-            # Calculate first extrusion strength using base amount and fractal value
+            if not new_faces or not new_verts:  # Safety check
+                return False
+                
+            # Calculate first extrusion strength with additional safety
             extrude_strength = scene.fractal_first_extrude_amount * fractal_value * scene.fractal_complexity
-            extrude_strength = min(extrude_strength, 2.0)  # Cap maximum extrusion
+            extrude_strength = safe_value(extrude_strength, 0.1, 0.01, 1.0)  # More conservative cap
             
-            # Generate a deterministic random factor based on face center and seed
+            # Generate a deterministic random factor with safety
             if scene.fractal_complexity > 0.5:
-                # Use face's position and seed to create deterministic randomness
-                face_center = face.calc_center_median()
-                position_hash = (face_center.x * 1000 + face_center.y * 100 + face_center.z * 10) * scene.fractal_seed
-                # Generate a pseudo-random factor that's consistent for the same face and seed
-                rand_factor = 0.8 + ((position_hash % 400) / 1000)  # Range: 0.8 to 1.2
-                extrude_strength *= rand_factor
+                try:
+                    face_center = face.calc_center_median()
+                    position_hash = (face_center.x * 1000 + face_center.y * 100 + face_center.z * 10) * scene.fractal_seed
+                    # Generate a pseudo-random factor with tighter bounds
+                    rand_factor = 0.9 + ((position_hash % 200) / 1000)  # Range: 0.9 to 1.1
+                    extrude_strength *= rand_factor
+                except:
+                    # Skip randomization if calculation fails
+                    pass
             
             # Move vertices along normal for first extrusion
             if new_verts:
                 if scene.fractal_extrude_along_normal:
-                    # Use face normal for extrusion
                     extrude_vec = face_normal * extrude_strength
                 else:
-                    # Use global Z for extrusion
                     extrude_vec = Vector((0, 0, extrude_strength))
                     
-                bmesh.ops.translate(
-                    self.bm,
-                    vec=extrude_vec,
-                    verts=new_verts
-                )
-            
-            # --- STEP 2: INSET FACES ---
-            # Set up inset parameters
+                # Safety check for extrusion vector
+                if extrude_vec.length > 0.0001 and extrude_vec.length < 10.0:
+                    bmesh.ops.translate(
+                        self.bm,
+                        vec=extrude_vec,
+                        verts=new_verts
+                    )
+                
+            # --- STEP 2: INSET FACES with safety limits---
+            # Set up inset parameters with additional safety
             inset_amount = scene.fractal_inset_amount * fractal_value
-            inset_amount = min(inset_amount, 0.9)  # Cap maximum inset
+            inset_amount = safe_value(inset_amount, 0.3, 0.01, 0.7)  # More conservative cap
             
             inset_depth = scene.fractal_inset_depth * fractal_value
+            inset_depth = safe_value(inset_depth, 0.0, -0.3, 0.3)  # More conservative cap
             
-            # Inset the newly created faces to create the stepping effect
-            inset_result = bmesh.ops.inset_region(
-                self.bm,
-                faces=new_faces,
-                thickness=inset_amount,
-                depth=inset_depth,
-                use_even_offset=True,
-                use_interpolate=True,
-                use_relative_offset=scene.fractal_inset_relative,
-                use_edge_rail=scene.fractal_inset_edges_only
-            )
+            # Safety check for faces before inset
+            valid_faces = [f for f in new_faces if validate_face(f)]
+            if not valid_faces:
+                return False
             
-            # Get the inner faces from the inset operation
-            inner_faces = inset_result.get("faces", [])
+            # Inset with try/except for added safety
+            try:
+                inset_result = bmesh.ops.inset_region(
+                    self.bm,
+                    faces=valid_faces,
+                    thickness=inset_amount,
+                    depth=inset_depth,
+                    use_even_offset=True,
+                    use_interpolate=True,
+                    use_relative_offset=scene.fractal_inset_relative,
+                    use_edge_rail=scene.fractal_inset_edges_only
+                )
+                
+                # Get the inner faces from the inset operation
+                inner_faces = inset_result.get("faces", [])
+            except Exception:
+                # If inset fails, return what we've done so far
+                return True
             
-            # --- STEP 3: SECOND EXTRUSION ---
+            # --- STEP 3: SECOND EXTRUSION with safety limits---
             # Only proceed if we have valid inner faces
             if inner_faces:
-                # For each inner face, extrude separately for better control
-                for inner_face in inner_faces:
+                # Limit the number of inner faces to process for stability
+                max_inner_faces = min(len(inner_faces), 20)
+                for i in range(max_inner_faces):
+                    inner_face = inner_faces[i]
                     if not validate_face(inner_face):
                         continue
                     
-                    # Determine which normal to use
-                    if scene.fractal_use_individual_normals:
-                        # Use this face's own normal (more variation)
-                        inner_normal = inner_face.normal.copy()
-                        if inner_normal.length < 0.001:
-                            inner_normal = face_normal  # Fall back to original normal
+                    try:
+                        # Determine which normal to use
+                        if scene.fractal_use_individual_normals:
+                            inner_normal = inner_face.normal.copy()
+                            if inner_normal.length < 0.001:
+                                inner_normal = face_normal
+                            else:
+                                inner_normal.normalize()
                         else:
-                            inner_normal.normalize()
-                    else:
-                        # Use original face normal (more uniform)
-                        inner_normal = face_normal
-                        
-                    # Extrude this inner face (the second extrusion in our pattern)
-                    face_extrude_result = bmesh.ops.extrude_face_region(self.bm, geom=[inner_face])
-                    face_verts = [g for g in face_extrude_result["geom"] if isinstance(g, bmesh.types.BMVert)]
-                    
-                    if face_verts:
-                        # The second extrusion is a factor of the first, creating the stepping effect
-                        second_extrude_strength = extrude_strength * scene.fractal_second_extrude_factor
-                        
-                        if scene.fractal_extrude_along_normal:
-                            # Use the determined normal for extrusion
-                            second_extrude_vec = inner_normal * second_extrude_strength
-                        else:
-                            # Use global Z for extrusion
-                            second_extrude_vec = Vector((0, 0, second_extrude_strength))
+                            inner_normal = face_normal
                             
-                        bmesh.ops.translate(
-                            self.bm,
-                            vec=second_extrude_vec,
-                            verts=face_verts
-                        )
+                        # Extrude this inner face (the second extrusion in our pattern)
+                        face_extrude_result = bmesh.ops.extrude_face_region(self.bm, geom=[inner_face])
+                        face_verts = [g for g in face_extrude_result.get("geom", []) 
+                                      if isinstance(g, bmesh.types.BMVert)]
+                        
+                        if face_verts:
+                            # The second extrusion with safety limits
+                            second_extrude_strength = extrude_strength * scene.fractal_second_extrude_factor
+                            second_extrude_strength = safe_value(second_extrude_strength, 0.1, 0.01, 0.8)
+                            
+                            if scene.fractal_extrude_along_normal:
+                                second_extrude_vec = inner_normal * second_extrude_strength
+                            else:
+                                second_extrude_vec = Vector((0, 0, second_extrude_strength))
+                            
+                            # Safety check for extrusion vector
+                            if (second_extrude_vec.length > 0.0001 and 
+                                second_extrude_vec.length < 10.0):
+                                bmesh.ops.translate(
+                                    self.bm,
+                                    vec=second_extrude_vec,
+                                    verts=face_verts
+                                )
+                    except Exception:
+                        # Skip this face if there's an error
+                        continue
             
             return True
-            
+        
         except Exception as e:
-            debug_print(f"Error in fractal stepping pattern: {e}")
-            if DEBUG:
-                traceback.print_exc()
+            debug_print(f"Error in fractal stepping pattern: {str(e)}")
             return False
 
     def get_fractal_value(self, center, fractal_type, scene):
@@ -440,7 +589,23 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             if fractal_type == 'MANDELBROT':
                 return self.mandelbrot_value(x, y, iterations)
             elif fractal_type == 'JULIA':
-                return self.julia_value(x, y, iterations)
+                # Get seed from properties
+                seed_real = scene.fractal_julia_seed_real
+                seed_imag = scene.fractal_julia_seed_imag
+                power = scene.fractal_power
+                return self.julia_value(x, y, iterations, seed_real, seed_imag, power)
+            elif fractal_type == 'JULIA_CUBIC':
+                seed_real = scene.fractal_julia_seed_real
+                seed_imag = scene.fractal_julia_seed_imag
+                return self.julia_value(x, y, iterations, seed_real, seed_imag, 3)
+            elif fractal_type == 'JULIA_QUARTIC':
+                seed_real = scene.fractal_julia_seed_real
+                seed_imag = scene.fractal_julia_seed_imag
+                return self.julia_value(x, y, iterations, seed_real, seed_imag, 4)
+            elif fractal_type == 'JULIA_QUINTIC':
+                seed_real = scene.fractal_julia_seed_real
+                seed_imag = scene.fractal_julia_seed_imag
+                return self.julia_value(x, y, iterations, seed_real, seed_imag, 5)
             elif fractal_type == 'QUINTIC_MANDELBULB':
                 return self.quintic_mandelbulb_value(x, y, z, iterations)
             elif fractal_type == 'CUBIC_MANDELBULB':
@@ -452,46 +617,91 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             return 0.3
     
     def mandelbrot_value(self, x, y, max_iter):
-        """Calculate Mandelbrot set value with early bailout optimization"""
-        c = complex(x, y)
-        z = 0
-        
-        # Early bailout check
-        if x*x + y*y > 4.0:
-            return 0.0  # Definitely outside the set
+        """Calculate Mandelbrot set value with enhanced optimization and safety checks"""
+        try:
+            # Limit input values to prevent extreme calculations
+            x = safe_value(x, 0, -3, 3)
+            y = safe_value(y, 0, -3, 3)
+            max_iter = min(max_iter, 500)  # Hard cap on iterations
             
-        # Main iteration loop with faster bailout
-        for i in range(max_iter):
-            z_abs = abs(z)
-            if z_abs > 4:  # Use 4 instead of 2 for bailout (faster check)
-                return i / max_iter
-            z = z * z + c
+            # Early bailout optimization
+            # Check if point is in main cardioid or period-2 bulb
+            q = (x - 0.25)**2 + y**2
+            if q * (q + (x - 0.25)) < 0.25 * (y**2):
+                return 1.0  # Inside cardioid
             
-            # Safety check for infinity/NaN
-            if math.isnan(z.real) or math.isnan(z.imag) or math.isinf(z.real) or math.isinf(z.imag):
-                return 0.0
-        
-        return 1.0
+            if (x + 1.0)**2 + y**2 < 0.0625:
+                return 1.0  # Inside period-2 bulb
+                
+            # Main iteration with smooth coloring
+            c = complex(x, y)
+            z = complex(0, 0)
+            
+            # Optimized escape detection
+            for i in range(max_iter):
+                # Using z_squared directly saves one complex multiplication per iteration
+                z_squared = complex(z.real * z.real - z.imag * z.imag, 2 * z.real * z.imag)
+                z = z_squared + c
+                
+                # Check escape condition using squared magnitude
+                mag_squared = z.real * z.real + z.imag * z.imag
+                
+                if mag_squared > 4.0:  # Radius 2 squared = 4
+                    # Smooth coloring formula for better visual results
+                    smooth_i = i + 1 - math.log(math.log(mag_squared)) / math.log(2)
+                    return smooth_i / max_iter
+                
+                # Check for numerical instability
+                if math.isnan(z.real) or math.isnan(z.imag) or math.isinf(z.real) or math.isinf(z.imag):
+                    return 0.0
+            
+            # If we reached max iterations, point is in the set
+            return 1.0
+        except Exception as e:
+            # Fallback value if calculation fails
+            debug_print(f"Mandelbrot calculation error: {e}")
+            return 0.3
     
-    def julia_value(self, x, y, max_iter, seed=-0.8 + 0.156j):
-        """Calculate Julia set value with safety checks"""
-        z = complex(x, y)
-        c = seed  # Fixed seed for consistent pattern
-        
-        # Early bailout
-        if abs(z) > 4.0:
-            return 0.0
+    def julia_value(self, x, y, max_iter, seed_real=-0.8, seed_imag=0.156, power=2):
+        """Calculate Julia set value with custom seed and power"""
+        try:
+            # Limit input values to prevent extreme calculations
+            x = safe_value(x, 0, -3, 3)
+            y = safe_value(y, 0, -3, 3)
+            max_iter = min(max_iter, 500)
             
-        for i in range(max_iter):
-            if abs(z) > 4:
-                return i / max_iter
-            z = z * z + c
+            # The c parameter is fixed for Julia sets
+            c = complex(seed_real, seed_imag)
             
-            # Safety check for infinity/NaN
-            if math.isnan(z.real) or math.isnan(z.imag) or math.isinf(z.real) or math.isinf(z.imag):
-                return 0.0
-        
-        return 1.0
+            # Starting z is the input coordinate
+            z = complex(x, y)
+            
+            # Main iteration loop with smooth coloring
+            for i in range(max_iter):
+                # Special case for power=2 (most common)
+                if power == 2:
+                    z = z * z + c
+                else:
+                    # For other powers, use cmath.pow
+                    z = cmath.pow(z, power) + c
+                
+                # Check escape condition
+                mag_squared = z.real * z.real + z.imag * z.imag
+                
+                if mag_squared > 4.0:
+                    # Smooth coloring
+                    smooth_i = i + 1 - math.log(math.log(mag_squared)) / math.log(2)
+                    return smooth_i / max_iter
+                
+                # Check for numerical instability
+                if math.isnan(z.real) or math.isnan(z.imag) or math.isinf(z.real) or math.isinf(z.imag):
+                    return 0.0
+            
+            # If we reached max iterations, point is in the set
+            return 1.0
+        except Exception as e:
+            debug_print(f"Julia calculation error: {e}")
+            return 0.3
     
     def quintic_mandelbulb_value(self, x, y, z, max_iter):
         """Calculate 3D Quintic Mandelbulb value with safety checks"""
@@ -512,6 +722,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             
             # Early bailout check
             if r2 > bailout:
+                # Simple smooth coloring for 3D
                 return i / iterations
             
             # Check for NaN or inf
@@ -594,7 +805,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         return 0.0  # Inside the set
 
     def modal(self, context, event):
-        """Modal handler for batch processing"""
+        """Modal handler for batch processing with enhanced safety"""
         try:
             if event.type == 'ESC' or context.window_manager.fractal_should_cancel:
                 self.report({'INFO'}, "Fractal generation cancelled")
@@ -602,6 +813,11 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 return {'CANCELLED'}
                 
             if event.type == 'TIMER':
+                # Safety check
+                if not self.check_operation_safety():
+                    self.cleanup(context, cancelled=True)
+                    return {'CANCELLED'}
+                    
                 # Update progress
                 if hasattr(context.window_manager, 'fractal_progress'):
                     progress = (self.current_batch / len(self.face_batches)) * 100
@@ -609,7 +825,12 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 
                 # Process next batch
                 if self.current_batch < len(self.face_batches):
-                    self.process_batch(context, self.current_batch)
+                    success = self.process_batch(context, self.current_batch)
+                    if not success:
+                        self.report({'WARNING'}, "Batch processing failed, stopping safely")
+                        self.cleanup(context, cancelled=True)
+                        return {'CANCELLED'}
+                        
                     self.current_batch += 1
                     return {'RUNNING_MODAL'}
                 else:
@@ -646,10 +867,31 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 # Calculate face center
                 center = face.calc_center_median()
                 
-                # Calculate fractal value
-                fractal_value = self.get_fractal_value(
-                    center, scene.fractal_type, scene
-                )
+                # Check for symmetry optimizations
+                if scene.use_symmetry:
+                    # Get the symmetry properties based on fractal type
+                    if scene.fractal_type == 'JULIA':
+                        symmetry = self.apply_symmetry(scene.fractal_type, scene.fractal_power)
+                    else:
+                        symmetry = self.apply_symmetry(scene.fractal_type)
+                        
+                    # Use symmetry to optimize calculations
+                    if symmetry['symmetry_type'] == 'MIRROR_X' and center.y < 0:
+                        # For Mandelbrot with y-axis mirror symmetry, reflect point across x-axis
+                        mirror_center = Vector((center.x, -center.y, center.z))
+                        fractal_value = self.get_fractal_value(
+                            mirror_center, scene.fractal_type, scene
+                        )
+                    else:
+                        # Calculate normally for other symmetry types or original quadrant
+                        fractal_value = self.get_fractal_value(
+                            center, scene.fractal_type, scene
+                        )
+                else:
+                    # No symmetry optimization, calculate normally
+                    fractal_value = self.get_fractal_value(
+                        center, scene.fractal_type, scene
+                    )
                 
                 # Apply extrusion based on fractal value
                 if fractal_value > 0.1:  # Threshold to avoid tiny extrusions
@@ -662,6 +904,11 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                         debug_print(f"Error extruding face: {e}")
                 
                 self.processed_faces += 1
+                
+                # Safety check for vertex count during processing
+                if len(self.bm.verts) > MAX_SAFE_VERTICES:
+                    self.report({'WARNING'}, f"Vertex limit reached ({len(self.bm.verts)}), stopping batch")
+                    break
             
             # Update the mesh
             bmesh.update_edit_mesh(self.mesh)
@@ -836,7 +1083,7 @@ def register_properties():
         description="Number of fractal iterations (higher = more detailed but slower)",
         default=50,
         min=5,
-        max=200
+        max=500
     )
     bpy.types.Scene.fractal_scale = FloatProperty(
         name="Scale",
@@ -862,11 +1109,46 @@ def register_properties():
         description="Type of fractal pattern to generate",
         items=[
             ('MANDELBROT', "Mandelbrot", "Classic 2D Mandelbrot set"),
-            ('JULIA', "Julia", "Classic 2D Julia set"),
+            ('JULIA', "Julia", "Julia set with custom power"),
+            ('JULIA_CUBIC', "Julia Cubic", "Julia set with power=3"),
+            ('JULIA_QUARTIC', "Julia Quartic", "Julia set with power=4"),
+            ('JULIA_QUINTIC', "Julia Quintic", "Julia set with power=5"),
             ('QUINTIC_MANDELBULB', "Quintic Mandelbulb", "3D Quintic Mandelbulb (power=5)"),
             ('CUBIC_MANDELBULB', "Cubic Mandelbulb", "3D Cubic Mandelbulb (power=3)"),
         ],
         default='MANDELBROT'
+    )
+    
+    # Julia set specific properties
+    bpy.types.Scene.fractal_julia_seed_real = FloatProperty(
+        name="Julia Seed Real",
+        description="Real part of the complex constant C for Julia sets",
+        default=-0.8,
+        min=-2.0,
+        max=2.0,
+        precision=4
+    )
+    bpy.types.Scene.fractal_julia_seed_imag = FloatProperty(
+        name="Julia Seed Imaginary",
+        description="Imaginary part of the complex constant C for Julia sets",
+        default=0.156,
+        min=-2.0,
+        max=2.0,
+        precision=4
+    )
+    bpy.types.Scene.fractal_power = IntProperty(
+        name="Power",
+        description="Exponent power for Julia sets (z^n + c)",
+        default=2,
+        min=2,
+        max=9
+    )
+    
+    # Symmetry properties
+    bpy.types.Scene.use_symmetry = BoolProperty(
+        name="Use Symmetry",
+        description="Optimize calculation using fractal symmetry properties",
+        default=True
     )
     
     # Pattern properties for extrude-inset-extrude stepping effect
@@ -961,12 +1243,7 @@ def register_properties():
     )
 
 def unregister_properties():
-    """Unregister properties associated with the fractal generator.
-    
-    This function removes all custom properties related to the fractal generation
-    from the Blender WindowManager and Scene types. This includes properties for
-    processing state, fractal configuration, and safety limits.
-    """
+    """Unregister properties associated with the fractal generator."""
     # Remove window manager properties
     del bpy.types.WindowManager.fractal_is_processing
     del bpy.types.WindowManager.fractal_should_cancel
@@ -983,6 +1260,14 @@ def unregister_properties():
     del bpy.types.Scene.fractal_face_limit
     del bpy.types.Scene.fractal_batch_processing
     del bpy.types.Scene.fractal_batch_size
+    
+    # Remove Julia-specific properties
+    del bpy.types.Scene.fractal_julia_seed_real
+    del bpy.types.Scene.fractal_julia_seed_imag
+    del bpy.types.Scene.fractal_power
+    
+    # Remove symmetry properties
+    del bpy.types.Scene.use_symmetry
     
     # Remove pattern-specific properties
     del bpy.types.Scene.fractal_inset_amount
