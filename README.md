@@ -1,10 +1,14 @@
+<p align="center">
+  <img src="images/advanced_fractal_generator_blender_icon.svg" alt="Generator Icon" width="180">
+</p>
+
 # Advanced Fractal Geometry Generator for Blender
+
+<img src="images/github-banner-larger-ui.png" alt="Crystalline Architecture Generator Banner" width="100%">
 
 ## Overview
 
 The Advanced Fractal Geometry Generator is a powerful Blender addon that creates complex, fractal-based geometry modifications. It transforms selected faces using mathematical fractal patterns to create intricate, organic structures with less effort.
-
-![Fractal Generator](https://via.placeholder.com/800x400.png?text=Fractal+Generator+Example)
 
 ## Features
 
