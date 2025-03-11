@@ -8,12 +8,15 @@ The Advanced Fractal Geometry Generator is a powerful Blender addon that creates
 
 ## Features
 
-- **Multiple Fractal Types**: Choose from classic 2D fractals (Mandelbrot, Julia) and 3D fractals (Cubic and Quintic Mandelbulbs)
+- **Multiple Fractal Types**: Choose from classic 2D fractals (Mandelbrot, custom power Julia sets) and 3D fractals (Cubic and Quintic Mandelbulbs)
+- **Symmetry Optimization**: Leverage mathematical symmetry for more efficient calculations
+- **Specialized Julia Sets**: Create cubic, quartic, and quintic Julia sets with customizable parameters
 - **Detailed Control**: Fine-tune your fractal patterns with controls for scale, complexity, and iterations
 - **Stepping Pattern System**: Create complex geometry using the extrude → inset → extrude pattern
 - **Face Selection**: Work on all faces or only selected faces
 - **Batch Processing**: Process large meshes efficiently with controlled batch sizes
 - **Performance Safeguards**: Prevent system slowdowns with intelligent limits and warnings
+- **Crash Protection**: Enhanced error handling and resource monitoring
 
 ## Installation
 
@@ -38,13 +41,22 @@ The Advanced Fractal Geometry Generator is a powerful Blender addon that creates
 
 - **Fractal Type**: Choose the mathematical pattern to apply
   - Mandelbrot: Classic 2D Mandelbrot set
-  - Julia: Classic 2D Julia set
+  - Julia: Julia set with custom power (Z^n)
+  - Julia Cubic: Julia set with power=3
+  - Julia Quartic: Julia set with power=4
+  - Julia Quintic: Julia set with power=5
   - Quintic Mandelbulb: 3D fractal with power=5
   - Cubic Mandelbulb: 3D fractal with power=3
 - **Scale**: Controls the scale of the fractal pattern
 - **Complexity**: Affects extrusion height and pattern intricacy
 - **Selected Faces Only**: When enabled, only works on selected faces
 - **Face Limit**: Maximum number of faces to process for performance
+
+#### Julia Set Parameters (for Julia fractal types)
+
+- **Julia Seed Real**: Real part of the complex constant C
+- **Julia Seed Imaginary**: Imaginary part of the complex constant C
+- **Power** (Z^n): Exponent power for custom Julia sets
 
 #### Stepping Pattern Settings
 
@@ -66,6 +78,7 @@ The Advanced Fractal Geometry Generator is a powerful Blender addon that creates
 - **Iterations**: Number of fractal iterations (higher values create more detail but slower)
 - **Random Seed**: Seed for random generation (allows reproducible results)
 - **Smooth Shading**: Applies smooth shading to the result
+- **Use Symmetry**: Optimize calculation speed by leveraging fractal symmetry properties
 
 #### Safety Settings
 - **Batch Processing**: Processes faces in batches for better UI responsiveness
@@ -75,17 +88,32 @@ The Advanced Fractal Geometry Generator is a powerful Blender addon that creates
 
 - Start with a simple shape and low face count to see how the settings affect the result
 - Use the "Randomize Seed" button to quickly explore different variations
+- Julia sets with power > 2 create interesting n-fold symmetric patterns
+- Try values near the edge of the Mandelbrot set for the most interesting Julia sets
+- Enable "Use Symmetry" for faster processing, especially with Julia sets
 - If performance is slow, try reducing the number of iterations or face limit
 - For the most intricate results, try the Mandelbulb fractals with high iteration counts
 - The "Complexity" setting dramatically affects the resulting geometry - start with lower values
 - Use batch processing for large meshes to keep Blender responsive during generation
+
+## Exploring Julia Sets
+
+Julia sets display fascinating symmetry based on their power:
+- Power 2: The classic Julia set with mirror symmetry
+- Power 3: Three-fold rotational symmetry
+- Power 4: Four-fold rotational symmetry
+- Power 5: Five-fold rotational symmetry
+
+Changing the seed values creates entirely different patterns. The "Randomize Seed" button will generate parameters that produce interesting results.
 
 ## Performance Considerations
 
 - High iteration counts (>100) may cause slow processing
 - Large face counts can significantly impact performance
 - The 3D Mandelbulb fractals are more computationally intensive than 2D fractals
+- Disabling symmetry optimization may result in slower calculations
 - If Blender becomes unresponsive, you can always cancel the operation
+- The addon includes automatic vertex limit detection to prevent crashes
 
 ## Troubleshooting
 
@@ -93,6 +121,7 @@ The Advanced Fractal Geometry Generator is a powerful Blender addon that creates
 - **Blender crashes**: Try reducing face limit, batch size, or iterations
 - **Strange geometry artifacts**: Check for very small inset or extrusion values
 - **Processing seems stuck**: For large operations, check the progress bar or use the Cancel button
+- **Out of memory errors**: Try enabling batch processing with smaller batch sizes
 
 ## Compatible Blender Versions
 
