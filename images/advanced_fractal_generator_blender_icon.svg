@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background with gradient -->
+  <defs>
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#263238" />
+      <stop offset="100%" stop-color="#1A1A1A" />
+    </linearGradient>
+    
+    <linearGradient id="fractal-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF7043" />
+      <stop offset="100%" stop-color="#FF9800" />
+    </linearGradient>
+    
+    <linearGradient id="mesh-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#29B6F6" />
+      <stop offset="100%" stop-color="#0288D1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="512" height="512" rx="60" fill="url(#bg-gradient)" />
+  
+  <!-- 3D Grid (representing Blender's 3D space) -->
+  <g opacity="0.15">
+    <path d="M96,96 L416,96" stroke="#FFFFFF" stroke-width="2" />
+    <path d="M96,256 L416,256" stroke="#FFFFFF" stroke-width="2" />
+    <path d="M96,416 L416,416" stroke="#FFFFFF" stroke-width="2" />
+    <path d="M96,96 L96,416" stroke="#FFFFFF" stroke-width="2" />
+    <path d="M256,96 L256,416" stroke="#FFFFFF" stroke-width="2" />
+    <path d="M416,96 L416,416" stroke="#FFFFFF" stroke-width="2" />
+  </g>
+  
+  <!-- Main Fractal Structure -->
+  <g transform="translate(256, 256)">
+    <!-- Level 1 (largest) -->
+    <path d="M0,-120 L104,60 L-104,60 Z" fill="url(#fractal-gradient)" opacity="0.9" />
+    
+    <!-- Level 2 -->
+    <path d="M0,-60 L52,30 L-52,30 Z" fill="url(#mesh-gradient)" opacity="0.9" transform="translate(0,-60)" />
+    <path d="M0,-60 L52,30 L-52,30 Z" fill="url(#mesh-gradient)" opacity="0.9" transform="translate(78,45) rotate(0)" />
+    <path d="M0,-60 L52,30 L-52,30 Z" fill="url(#mesh-gradient)" opacity="0.9" transform="translate(-78,45) rotate(0)" />
+    
+    <!-- Level 3 (smallest) -->
+    <path d="M0,-30 L26,15 L-26,15 Z" fill="url(#fractal-gradient)" opacity="0.9" transform="translate(0,-120)" />
+    <path d="M0,-30 L26,15 L-26,15 Z" fill="url(#fractal-gradient)" opacity="0.9" transform="translate(78,-15)" />
+    <path d="M0,-30 L26,15 L-26,15 Z" fill="url(#fractal-gradient)" opacity="0.9" transform="translate(-78,-15)" />
+  </g>
+  
+  <!-- Fractal Dots (representing recursion points) -->
+  <circle cx="256" cy="136" r="8" fill="#FFFFFF" opacity="0.8" />
+  <circle cx="360" cy="301" r="8" fill="#FFFFFF" opacity="0.8" />
+  <circle cx="152" cy="301" r="8" fill="#FFFFFF" opacity="0.8" />
+  
+  <!-- Small wireframe cube (representing 3D mesh) -->
+  <g transform="translate(256, 256) rotate(45) scale(0.5)" stroke="#FFFFFF" stroke-width="3" fill="none" opacity="0.25">
+    <!-- Front face -->
+    <path d="M-80,-80 L80,-80 L80,80 L-80,80 Z" />
+    <!-- Back face -->
+    <path d="M-60,-60 L100,-60 L100,100 L-60,100 Z" />
+    <!-- Connecting lines -->
+    <path d="M-80,-80 L-60,-60" />
+    <path d="M80,-80 L100,-60" />
+    <path d="M80,80 L100,100" />
+    <path d="M-80,80 L-60,100" />
+  </g>
+</svg>
