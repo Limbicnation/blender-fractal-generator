@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Advanced Fractal Geometry Generator is a powerful Blender addon that creates complex, fractal-based geometry modifications. It transforms selected faces using mathematical fractal patterns to create intricate, organic structures with minimal effort.
+The Advanced Fractal Geometry Generator is a powerful Blender addon that creates complex, fractal-based geometry modifications. It transforms selected faces using mathematical fractal patterns to create intricate, organic structures with less effort.
 
 ![Fractal Generator](https://via.placeholder.com/800x400.png?text=Fractal+Generator+Example)
 
