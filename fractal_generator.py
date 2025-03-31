@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false
 bl_info = {
     "name": "Advanced Fractal Geometry Generator",
     "author": "Your Name",
