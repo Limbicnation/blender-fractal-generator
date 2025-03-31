@@ -139,6 +139,67 @@ def cached_fractal_calc(func):
     
     return wrapper
 
+def progressive_scale_extrusion(extrusion_level, base_scale=1.0):
+    """Apply progressive scaling to extrusions to create more harmonious shapes.
+    Each level of recursion gets smaller by a controlled factor."""
+    # Exponential decay factor (makes each level progressively smaller)
+    decay_factor = 0.7
+    # Calculate scaling based on recursion level
+    scale = base_scale * (decay_factor ** extrusion_level)
+    # Ensure minimum scale to prevent microscopic extrusions
+    return max(0.05, scale)
+
+def align_extrusion_normal(face, face_normal, neighboring_faces):
+    """Adjust extrusion direction for better visual coherence with neighbors"""
+    if not neighboring_faces:
+        return face_normal
+    
+    # Get average normal of neighboring faces
+    avg_normal = Vector((0, 0, 0))
+    for neighbor in neighboring_faces:
+        if neighbor.normal.length > 0.0001:
+            avg_normal += neighbor.normal
+    
+    if avg_normal.length < 0.0001:
+        return face_normal
+    
+    avg_normal.normalize()
+    
+    # Blend face normal with neighborhood normal
+    # More weight to face normal to preserve detail
+    blended_normal = face_normal * 0.7 + avg_normal * 0.3
+    
+    if blended_normal.length < 0.0001:
+        return face_normal
+        
+    blended_normal.normalize()
+    return blended_normal
+
+def get_coherent_extrusion(face, face_normal, neighbors, current_level):
+    """Calculate extrusion parameters that ensure coherence with neighboring faces.
+    Creates more visually pleasing, organized structures."""
+    # Base extrusion length with progressive scaling
+    extrusion_length = progressive_scale_extrusion(current_level, 0.15)
+    
+    # If we have neighbors, blend our normal with neighbor normals
+    if neighbors:
+        # Calculate average neighbor normal
+        avg_normal = Vector((0, 0, 0))
+        for neighbor in neighbors:
+            if neighbor.normal.length > 0.0001:
+                avg_normal += neighbor.normal
+        
+        if avg_normal.length > 0.0001:
+            avg_normal.normalize()
+            # Blend face normal with average neighbor normal
+            # Use 70% face normal, 30% neighbor influence for subtle coherence
+            blended_normal = (face_normal * 0.7 + avg_normal * 0.3)
+            blended_normal.normalize()
+            return blended_normal * extrusion_length
+    
+    # Default fallback if no valid neighbors
+    return face_normal * extrusion_length
+
 def validate_face(face):
     """Check if a face is valid for processing with enhanced stability checks"""
     if not face or not hasattr(face, "is_valid") or not face.is_valid:
@@ -364,6 +425,7 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         box.prop(scene, "fractal_seed")
         box.prop(scene, "use_smooth_shading")
         box.prop(scene, "use_symmetry")
+        box.prop(scene, "use_progressive_scaling")
         
         # Safety Settings
         box = layout.box()
@@ -436,6 +498,7 @@ class MESH_OT_fractal_reset_defaults(bpy.types.Operator):
         # Reset other properties
         scene.use_smooth_shading = False
         scene.use_symmetry = True
+        scene.use_progressive_scaling = True
         scene.fractal_selected_only = True
         scene.fractal_face_limit = 500
         scene.fractal_batch_processing = True
@@ -592,8 +655,8 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 'has_additional_symmetry': False
             }
 
-    def process_complex_pattern(self, face, fractal_value, scene):
-        """Process a face with extrude → insert → extrude pattern - with enhanced safety"""
+    def process_complex_pattern(self, face, fractal_value, scene, neighbors=None):
+        """Process a face with extrude → insert → extrude pattern - with enhanced coherence"""
         try:
             # Skip if face is not valid
             if not validate_face(face):
@@ -611,6 +674,9 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             # Skip faces with too many vertices
             if len(face.verts) > 50:  # Reduced from 100 for better stability
                 return False
+            
+            # Recursion level tracking for progressive scaling
+            current_level = 0
                 
             face_normal = face.normal.copy()
             if face_normal.length < 0.001:
@@ -619,7 +685,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             else:
                 face_normal.normalize()
                 
-            # --- STEP 1: FIRST EXTRUSION with safety limits ---
+            # --- STEP 1: FIRST EXTRUSION with coherent extrusion parameters ---
             # Extrude the face
             result = bmesh.ops.extrude_face_region(self.bm, geom=[face])
             
@@ -634,29 +700,38 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             if not new_faces or not new_verts:  # Safety check
                 return False
                 
-            # Calculate first extrusion strength with additional safety
-            extrude_strength = scene.fractal_first_extrude_amount * fractal_value * scene.fractal_complexity
-            extrude_strength = safe_value(extrude_strength, 0.1, 0.01, 1.0)  # More conservative cap
-            
-            # Generate a deterministic random factor with safety
-            if scene.fractal_complexity > 0.5:
-                try:
-                    face_center = face.calc_center_median()
-                    position_hash = (face_center.x * 1000 + face_center.y * 100 + face_center.z * 10) * scene.fractal_seed
-                    # Generate a pseudo-random factor with tighter bounds
-                    rand_factor = 0.9 + ((position_hash % 200) / 1000)  # Range: 0.9 to 1.1
-                    extrude_strength *= rand_factor
-                except:
-                    # Skip randomization if calculation fails
-                    pass
-            
-            # Move vertices along normal for first extrusion
-            if new_verts:
+            # Either use progressive scaling or traditional calculation
+            if hasattr(scene, "use_progressive_scaling") and scene.use_progressive_scaling:
+                # Use coherent extrusion with progressive scaling
+                coherent_vec = get_coherent_extrusion(face, face_normal, neighbors, current_level)
+                # Scale by fractal value and complexity for variation
+                coherent_vec *= fractal_value * scene.fractal_complexity * 2.0
+                extrude_vec = coherent_vec
+            else:
+                # Traditional calculation with additional safety
+                extrude_strength = scene.fractal_first_extrude_amount * fractal_value * scene.fractal_complexity
+                extrude_strength = safe_value(extrude_strength, 0.1, 0.01, 1.0)  # More conservative cap
+                
+                # Generate a deterministic random factor with safety
+                if scene.fractal_complexity > 0.5:
+                    try:
+                        face_center = face.calc_center_median()
+                        position_hash = (face_center.x * 1000 + face_center.y * 100 + face_center.z * 10) * scene.fractal_seed
+                        # Generate a pseudo-random factor with tighter bounds
+                        rand_factor = 0.9 + ((position_hash % 200) / 1000)  # Range: 0.9 to 1.1
+                        extrude_strength *= rand_factor
+                    except:
+                        # Skip randomization if calculation fails
+                        pass
+                
+                # Create extrusion vector
                 if scene.fractal_extrude_along_normal:
                     extrude_vec = face_normal * extrude_strength
                 else:
                     extrude_vec = Vector((0, 0, extrude_strength))
-                    
+            
+            # Move vertices along calculated vector
+            if new_verts:
                 # Safety check for extrusion vector
                 if extrude_vec.length > 0.0001 and extrude_vec.length < 10.0:
                     bmesh.ops.translate(
@@ -697,9 +772,12 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 # If inset fails, return what we've done so far
                 return True
             
-            # --- STEP 3: SECOND EXTRUSION with safety limits---
+            # --- STEP 3: SECOND EXTRUSION with progressive scaling ---
             # Only proceed if we have valid inner faces
             if inner_faces:
+                # Increment recursion level for progressive scaling
+                current_level += 1
+                
                 # Limit the number of inner faces to process for stability
                 max_inner_faces = min(len(inner_faces), 20)
                 for i in range(max_inner_faces):
@@ -708,13 +786,26 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                         continue
                     
                     try:
-                        # Determine which normal to use
+                        # Determine which normal to use with optional coherence
                         if scene.fractal_use_individual_normals:
                             inner_normal = inner_face.normal.copy()
                             if inner_normal.length < 0.001:
                                 inner_normal = face_normal
                             else:
                                 inner_normal.normalize()
+                                
+                            # Apply coherence with neighbors if available
+                            if neighbors:
+                                # Use inner face neighbors for second level coherence
+                                inner_neighbors = []
+                                for edge in inner_face.edges:
+                                    for adj_face in edge.link_faces:
+                                        if adj_face != inner_face and adj_face in inner_faces:
+                                            inner_neighbors.append(adj_face)
+                                
+                                if inner_neighbors and hasattr(scene, "use_progressive_scaling") and scene.use_progressive_scaling:
+                                    # Use neighbor-aware blending
+                                    inner_normal = align_extrusion_normal(inner_face, inner_normal, inner_neighbors)
                         else:
                             inner_normal = face_normal
                             
@@ -724,14 +815,29 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                                       if isinstance(g, bmesh.types.BMVert)]
                         
                         if face_verts:
-                            # The second extrusion with safety limits
-                            second_extrude_strength = extrude_strength * scene.fractal_second_extrude_factor
-                            second_extrude_strength = safe_value(second_extrude_strength, 0.1, 0.01, 0.8)
-                            
-                            if scene.fractal_extrude_along_normal:
-                                second_extrude_vec = inner_normal * second_extrude_strength
+                            # Choose between progressive scaling or traditional calculation
+                            if hasattr(scene, "use_progressive_scaling") and scene.use_progressive_scaling:
+                                # Use coherent, progressively scaled extrusion
+                                inner_neighbors = []
+                                for edge in inner_face.edges:
+                                    for adj_face in edge.link_faces:
+                                        if adj_face != inner_face and adj_face in inner_faces:
+                                            inner_neighbors.append(adj_face)
+                                            
+                                # Get progressively scaled extrusion vector
+                                second_vec = get_coherent_extrusion(inner_face, inner_normal, inner_neighbors, current_level)
+                                # Scale by fractal value and complexity
+                                second_vec *= fractal_value * scene.fractal_complexity * 1.5
+                                second_extrude_vec = second_vec
                             else:
-                                second_extrude_vec = Vector((0, 0, second_extrude_strength))
+                                # Traditional calculation with safety limits
+                                second_extrude_strength = extrude_strength * scene.fractal_second_extrude_factor
+                                second_extrude_strength = safe_value(second_extrude_strength, 0.1, 0.01, 0.8)
+                                
+                                if scene.fractal_extrude_along_normal:
+                                    second_extrude_vec = inner_normal * second_extrude_strength
+                                else:
+                                    second_extrude_vec = Vector((0, 0, second_extrude_strength))
                             
                             # Safety check for extrusion vector
                             if (second_extrude_vec.length > 0.0001 and 
@@ -1974,6 +2080,13 @@ def register_properties():
         description="Apply smooth shading to the result",
         default=False
     )
+    
+    # Progressive scaling property
+    bpy.types.Scene.use_progressive_scaling = BoolProperty(
+        name="Progressive Scaling",
+        description="Apply progressive scaling to create more harmonious fractal structures",
+        default=True
+    )
     bpy.types.Scene.fractal_selected_only = BoolProperty(
         name="Selected Faces Only",
         description="Apply fractal only to selected faces",
@@ -2015,6 +2128,7 @@ def unregister_properties():
     del bpy.types.Scene.fractal_seed
     del bpy.types.Scene.fractal_type
     del bpy.types.Scene.use_smooth_shading
+    del bpy.types.Scene.use_progressive_scaling
     del bpy.types.Scene.fractal_selected_only
     del bpy.types.Scene.fractal_face_limit
     del bpy.types.Scene.fractal_batch_processing
