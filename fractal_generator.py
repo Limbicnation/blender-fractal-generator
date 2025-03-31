@@ -139,221 +139,6 @@ def cached_fractal_calc(func):
     
     return wrapper
 
-def normalize_fractal_value(raw_value, fractal_type):
-    """Normalize and smooth fractal values for more predictable geometry"""
-    # Only apply normalization if enabled
-    if not ENABLE_VALUE_NORMALIZATION:
-        return max(0.0, min(1.0, raw_value))
-        
-    # Base normalization to ensure we're in [0,1] range
-    value = max(0.0, min(1.0, raw_value))
-    
-    # Apply non-linear scaling for more visual coherence
-    if fractal_type.startswith('JULIA'):
-        # Julia sets need smoother transition
-        return math.pow(value, 1.5)  # Emphasize higher values
-    elif fractal_type.endswith('MANDELBULB'):
-        # 3D Mandelbulbs need stronger thresholding
-        threshold = 0.2
-        if value < threshold:
-            return 0.0
-        return ((value - threshold) / (1.0 - threshold)) ** 1.2
-    else:  # Mandelbrot
-        # Apply sigmoid-like smoothing for Mandelbrot
-        if value < 0.3:
-            return value * 0.5  # Reduce low values
-        elif value > 0.7:
-            return 0.7 + (value - 0.7) * 0.7  # Gentle compression of high values
-        return value
-
-def calculate_extrusion_params(face, fractal_value, scene):
-    """Calculate extrusion parameters with improved consistency"""
-    # Skip controlled mapping if disabled
-    if not ENABLE_EXTRUSION_CONTROL:
-        return {
-            'first_extrude': scene.fractal_first_extrude_amount * fractal_value,
-            'inset_amount': scene.fractal_inset_amount,
-            'inset_depth': scene.fractal_inset_depth * fractal_value,
-            'second_extrude': scene.fractal_first_extrude_amount * fractal_value * scene.fractal_second_extrude_factor
-        }
-    
-    # Normalize the fractal value first
-    norm_value = normalize_fractal_value(fractal_value, scene.fractal_type)
-    
-    # Scale factor based on face size for more uniform results
-    face_area = face.calc_area()
-    area_factor = min(1.0, max(0.3, math.sqrt(face_area) * 2.0))
-    
-    # Apply controlled mapping for first extrusion
-    if norm_value < 0.2:
-        # Minimal extrusion for low values
-        first_extrude = scene.fractal_first_extrude_amount * 0.2 * area_factor
-    elif norm_value > 0.8:
-        # Cap maximum extrusion for high values
-        first_extrude = scene.fractal_first_extrude_amount * 0.8 * area_factor
-    else:
-        # Linear mapping for middle range
-        first_extrude = scene.fractal_first_extrude_amount * norm_value * area_factor
-    
-    # Similar controlled approach for inset
-    inset_amount = scene.fractal_inset_amount * (0.5 + norm_value * 0.5) * 0.8
-    
-    # Second extrusion uses more dampened value to prevent extreme variations
-    second_extrude = first_extrude * scene.fractal_second_extrude_factor * 0.7
-    
-    return {
-        'first_extrude': first_extrude,
-        'inset_amount': inset_amount,
-        'inset_depth': scene.fractal_inset_depth * norm_value * 0.5,  # Reduced impact
-        'second_extrude': second_extrude
-    }
-
-def select_coherent_faces(bm, selected_faces, max_faces=500):
-    """Select faces with better spatial coherence for more predictable results"""
-    if not selected_faces or not ENABLE_PATTERN_COHERENCE:
-        return selected_faces
-    
-    # Start with seed faces from selection
-    result_faces = selected_faces[:min(10, len(selected_faces))]
-    candidate_faces = set(selected_faces) - set(result_faces)
-    
-    # Build coherent groups by proximity
-    while len(result_faces) < max_faces and candidate_faces:
-        # Find the closest candidate to any face in our result set
-        best_candidate = None
-        best_distance = float('inf')
-        
-        for face in list(candidate_faces)[:100]:  # Limit search for performance
-            face_center = face.calc_center_median()
-            
-            # Find closest distance to any already-selected face
-            for selected in result_faces[-10:]:  # Check against recent selections
-                selected_center = selected.calc_center_median()
-                dist = (face_center - selected_center).length
-                
-                if dist < best_distance:
-                    best_distance = dist
-                    best_candidate = face
-        
-        if best_candidate:
-            result_faces.append(best_candidate)
-            candidate_faces.remove(best_candidate)
-        else:
-            break
-    
-    return result_faces
-
-def apply_coherence_pattern(faces, face_values, fractal_type):
-    """Apply smoothing to ensure neighboring faces have similar fractal values"""
-    if len(faces) <= 1 or not ENABLE_PATTERN_COHERENCE:
-        return face_values
-    
-    # Create a mapping of faces to their values
-    face_to_value = {face: value for face, value in zip(faces, face_values)}
-    
-    # Find adjacent faces for each face
-    for face in faces:
-        adjacent_faces = set()
-        for edge in face.edges:
-            for adjacent_face in edge.link_faces:
-                if adjacent_face in face_to_value and adjacent_face != face:
-                    adjacent_faces.add(adjacent_face)
-        
-        # Skip if no adjacent faces
-        if not adjacent_faces:
-            continue
-        
-        # Limit to closest neighbors to prevent over-smoothing
-        if len(adjacent_faces) > MAX_COHERENCE_NEIGHBORS:
-            # Convert to list for sorting
-            adjacent_list = list(adjacent_faces)
-            # Sort by distance to current face center
-            face_center = face.calc_center_median()
-            adjacent_list.sort(key=lambda adj: (adj.calc_center_median() - face_center).length)
-            # Keep only closest neighbors
-            adjacent_faces = set(adjacent_list[:MAX_COHERENCE_NEIGHBORS])
-        
-        # Apply neighborhood smoothing (average with neighbors)
-        adjacent_values = [face_to_value[adj_face] for adj_face in adjacent_faces]
-        avg_value = sum(adjacent_values) / len(adjacent_values)
-        
-        # Blend original value with neighborhood average
-        influence = NEIGHBOR_INFLUENCE
-        # Special case for Mandelbulbs - use less influence to preserve detail
-        if fractal_type.endswith('MANDELBULB'):
-            influence *= 0.7
-            
-        face_to_value[face] = face_to_value[face] * (1.0 - influence) + avg_value * influence
-    
-    # Return smoothed values
-    return [face_to_value[face] for face in faces]
-
-def align_extrusion_normal(face, face_normal, neighboring_faces):
-    """Adjust extrusion direction for better visual coherence with neighbors"""
-    if not neighboring_faces or not ENABLE_PATTERN_COHERENCE:
-        return face_normal
-    
-    # Get average normal of neighboring faces
-    avg_normal = Vector((0, 0, 0))
-    for neighbor in neighboring_faces:
-        if neighbor.normal.length > 0.0001:
-            avg_normal += neighbor.normal
-    
-    if avg_normal.length < 0.0001:
-        return face_normal
-    
-    avg_normal.normalize()
-    
-    # Blend face normal with neighborhood normal
-    # More weight to face normal to preserve detail
-    blend_factor = min(0.8, 1.0 - NEIGHBOR_INFLUENCE)  # At least 20% face normal
-    blended_normal = face_normal * blend_factor + avg_normal * (1.0 - blend_factor)
-    
-    if blended_normal.length < 0.0001:
-        return face_normal
-        
-    blended_normal.normalize()
-    return blended_normal
-
-def stable_mandelbulb_iteration(x, y, z, power):
-    """More stable power function for 3D Mandelbulbs"""
-    # Convert to spherical
-    r = math.sqrt(x*x + y*y + z*z)
-    
-    # Handle near-zero case more gracefully
-    if r < 0.000001:
-        return x, y, z
-    
-    # More stable spherical conversion
-    theta = math.atan2(math.sqrt(x*x + y*y), z)
-    phi = math.atan2(y, x)
-    
-    # Control power to avoid extreme values
-    actual_power = min(power, 8.0)  # Cap maximum power
-    
-    # Apply power function with stability controls
-    r_pow = min(pow(r, actual_power), 1000.0)
-    
-    # Prevent oscillation at high values
-    if r_pow > 100.0:
-        damping = 100.0 / r_pow
-        r_pow = 100.0
-    else:
-        damping = 1.0
-    
-    # Apply spherical functions with damping
-    sin_theta = math.sin(theta * actual_power) * damping
-    cos_theta = math.cos(theta * actual_power) * damping
-    sin_phi = math.sin(phi * actual_power) * damping
-    cos_phi = math.cos(phi * actual_power) * damping
-    
-    # Convert back to cartesian with controlled magnitude
-    new_x = r_pow * sin_theta * cos_phi
-    new_y = r_pow * sin_theta * sin_phi
-    new_z = r_pow * cos_theta
-    
-    return new_x, new_y, new_z
-
 def validate_face(face):
     """Check if a face is valid for processing with enhanced stability checks"""
     if not face or not hasattr(face, "is_valid") or not face.is_valid:
@@ -580,15 +365,6 @@ class FRACTAL_PT_main_panel(bpy.types.Panel):
         box.prop(scene, "use_smooth_shading")
         box.prop(scene, "use_symmetry")
         
-        # Visual Coherence Settings
-        box = layout.box()
-        box.label(text="Visual Coherence", icon='SHADERFX')
-        box.prop(scene, "fractal_enable_value_normalization")
-        box.prop(scene, "fractal_enable_coherence")
-        if scene.fractal_enable_coherence:
-            box.prop(scene, "fractal_coherence_strength")
-        box.prop(scene, "fractal_enable_extrusion_control")
-        
         # Safety Settings
         box = layout.box()
         box.label(text="Safety Settings", icon='CHECKMARK')
@@ -656,12 +432,6 @@ class MESH_OT_fractal_reset_defaults(bpy.types.Operator):
         scene.fractal_inset_edges_only = False
         scene.fractal_second_extrude_factor = 0.7
         scene.fractal_first_extrude_amount = 0.5
-        
-        # Reset coherence properties
-        scene.fractal_enable_value_normalization = True
-        scene.fractal_enable_coherence = True
-        scene.fractal_coherence_strength = 0.3
-        scene.fractal_enable_extrusion_control = True
         
         # Reset other properties
         scene.use_smooth_shading = False
@@ -822,8 +592,8 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 'has_additional_symmetry': False
             }
 
-    def process_complex_pattern(self, face, fractal_value, scene, neighboring_faces=None):
-        """Process a face with extrude → insert → extrude pattern - with enhanced coherence and stability"""
+    def process_complex_pattern(self, face, fractal_value, scene):
+        """Process a face with extrude → insert → extrude pattern - with enhanced safety"""
         try:
             # Skip if face is not valid
             if not validate_face(face):
@@ -842,7 +612,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             if len(face.verts) > 50:  # Reduced from 100 for better stability
                 return False
                 
-            # Get face normal with optional coherence alignment
             face_normal = face.normal.copy()
             if face_normal.length < 0.001:
                 # Use global Z if normal is invalid
@@ -850,32 +619,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             else:
                 face_normal.normalize()
                 
-            # Apply normal alignment if coherence is enabled and we have neighboring faces
-            if ENABLE_PATTERN_COHERENCE and neighboring_faces:
-                face_normal = align_extrusion_normal(face, face_normal, neighboring_faces)
-                
-            # --- STEP 1: FIRST EXTRUSION with controlled parameters ---
-            # Get extrusion parameters using improved coherence
-            if ENABLE_EXTRUSION_CONTROL:
-                params = calculate_extrusion_params(face, fractal_value, scene)
-                extrude_strength = params['first_extrude']
-                inset_amount = params['inset_amount']
-                inset_depth = params['inset_depth']
-                second_extrude_strength = params['second_extrude']
-            else:
-                # Legacy parameter calculation with safety limits
-                extrude_strength = scene.fractal_first_extrude_amount * fractal_value * scene.fractal_complexity
-                extrude_strength = safe_value(extrude_strength, 0.1, 0.01, 1.0)
-                
-                inset_amount = scene.fractal_inset_amount * fractal_value
-                inset_amount = safe_value(inset_amount, 0.3, 0.01, 0.7)
-                
-                inset_depth = scene.fractal_inset_depth * fractal_value
-                inset_depth = safe_value(inset_depth, 0.0, -0.3, 0.3)
-                
-                second_extrude_strength = extrude_strength * scene.fractal_second_extrude_factor
-                second_extrude_strength = safe_value(second_extrude_strength, 0.1, 0.01, 0.8)
-            
+            # --- STEP 1: FIRST EXTRUSION with safety limits ---
             # Extrude the face
             result = bmesh.ops.extrude_face_region(self.bm, geom=[face])
             
@@ -890,8 +634,12 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             if not new_faces or not new_verts:  # Safety check
                 return False
                 
+            # Calculate first extrusion strength with additional safety
+            extrude_strength = scene.fractal_first_extrude_amount * fractal_value * scene.fractal_complexity
+            extrude_strength = safe_value(extrude_strength, 0.1, 0.01, 1.0)  # More conservative cap
+            
             # Generate a deterministic random factor with safety
-            if scene.fractal_complexity > 0.5 and not ENABLE_EXTRUSION_CONTROL:
+            if scene.fractal_complexity > 0.5:
                 try:
                     face_center = face.calc_center_median()
                     position_hash = (face_center.x * 1000 + face_center.y * 100 + face_center.z * 10) * scene.fractal_seed
@@ -917,7 +665,14 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                         verts=new_verts
                     )
                 
-            # --- STEP 2: INSET FACES with controlled parameters ---
+            # --- STEP 2: INSET FACES with safety limits---
+            # Set up inset parameters with additional safety
+            inset_amount = scene.fractal_inset_amount * fractal_value
+            inset_amount = safe_value(inset_amount, 0.3, 0.01, 0.7)  # More conservative cap
+            
+            inset_depth = scene.fractal_inset_depth * fractal_value
+            inset_depth = safe_value(inset_depth, 0.0, -0.3, 0.3)  # More conservative cap
+            
             # Safety check for faces before inset
             valid_faces = [f for f in new_faces if validate_face(f)]
             if not valid_faces:
@@ -942,7 +697,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 # If inset fails, return what we've done so far
                 return True
             
-            # --- STEP 3: SECOND EXTRUSION with controlled parameters ---
+            # --- STEP 3: SECOND EXTRUSION with safety limits---
             # Only proceed if we have valid inner faces
             if inner_faces:
                 # Limit the number of inner faces to process for stability
@@ -953,17 +708,13 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                         continue
                     
                     try:
-                        # Determine which normal to use, with coherence if enabled
+                        # Determine which normal to use
                         if scene.fractal_use_individual_normals:
                             inner_normal = inner_face.normal.copy()
                             if inner_normal.length < 0.001:
                                 inner_normal = face_normal
                             else:
                                 inner_normal.normalize()
-                                
-                            # Apply normal coherence if enabled
-                            if ENABLE_PATTERN_COHERENCE and neighboring_faces:
-                                inner_normal = align_extrusion_normal(inner_face, inner_normal, neighboring_faces)
                         else:
                             inner_normal = face_normal
                             
@@ -973,6 +724,10 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                                       if isinstance(g, bmesh.types.BMVert)]
                         
                         if face_verts:
+                            # The second extrusion with safety limits
+                            second_extrude_strength = extrude_strength * scene.fractal_second_extrude_factor
+                            second_extrude_strength = safe_value(second_extrude_strength, 0.1, 0.01, 0.8)
+                            
                             if scene.fractal_extrude_along_normal:
                                 second_extrude_vec = inner_normal * second_extrude_strength
                             else:
@@ -1021,10 +776,8 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 FRACTAL_CACHE_HITS = 0
             
             # Call appropriate fractal calculation function with optimized dispatch
-            raw_value = 0.5  # Default value
-            
             if fractal_type == 'MANDELBROT':
-                raw_value = self.mandelbrot_value(x, y, iterations)
+                return self.mandelbrot_value(x, y, iterations)
                 
             elif fractal_type.startswith('JULIA'):
                 # Get seed parameters from properties
@@ -1043,19 +796,17 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 else:
                     power = 2
                     
-                raw_value = self.julia_value(x, y, iterations, seed_real, seed_imag, power)
+                return self.julia_value(x, y, iterations, seed_real, seed_imag, power)
                 
             elif fractal_type == 'QUINTIC_MANDELBULB':
-                raw_value = self.quintic_mandelbulb_value(x, y, z, iterations)
+                return self.quintic_mandelbulb_value(x, y, z, iterations)
                 
             elif fractal_type == 'CUBIC_MANDELBULB':
-                raw_value = self.cubic_mandelbulb_value(x, y, z, iterations)
+                return self.cubic_mandelbulb_value(x, y, z, iterations)
                 
-            # Apply normalization for improved visual coherence if enabled
-            if ENABLE_VALUE_NORMALIZATION:
-                return normalize_fractal_value(raw_value, fractal_type)
             else:
-                return raw_value
+                # Default value for unknown types - with gentle offset to avoid flatness
+                return 0.5
                 
         except Exception as e:
             # More informative error handling with traceback for debugging
@@ -1293,11 +1044,8 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             y = safe_value(y, 0, -3, 3)
             z = safe_value(z, 0, -3, 3)
             
-            # Use the stable iteration function for better numerical stability if enabled
-            if ENABLE_PATTERN_COHERENCE:
-                return self._quintic_mandelbulb_stable(x, y, z, max_iter)
-            # Otherwise use optimized implementation based on available libraries
-            elif NUMPY_AVAILABLE:
+            # Use optimized implementation based on available libraries
+            if NUMPY_AVAILABLE:
                 return self._quintic_mandelbulb_numpy(x, y, z, max_iter)
             else:
                 return self._quintic_mandelbulb_standard(x, y, z, max_iter)
@@ -1305,48 +1053,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         except Exception as e:
             debug_print(f"Quintic mandelbulb calculation error: {e}")
             return 0.3
-            
-    def _quintic_mandelbulb_stable(self, x, y, z, max_iter):
-        """More stable implementation of Quintic Mandelbulb using controlled iterations"""
-        # Original point
-        cx, cy, cz = x, y, z
-        # Start point
-        px, py, pz = 0, 0, 0
-        
-        # Quintic power
-        power = 5
-        
-        # Limit iterations and use bailout
-        iterations = min(max_iter, 100)
-        bailout = 4.0
-        
-        for i in range(iterations):
-            # Check escape condition
-            r2 = px*px + py*py + pz*pz
-            if r2 > bailout:
-                # Enhanced smooth coloring for better gradient
-                smooth_i = i + 1 - math.log(math.log(r2)) / math.log(power)
-                return smooth_i / iterations
-                
-            # Check for numerical instability
-            if math.isnan(r2) or math.isinf(r2):
-                return 0.0
-                
-            # Use stable iteration function to calculate next point
-            nx, ny, nz = stable_mandelbulb_iteration(px, py, pz, power)
-            
-            # Add constant (equivalent to c in standard formulas)
-            px = nx + cx
-            py = ny + cy
-            pz = nz + cz
-            
-            # Additional safety check for extreme values
-            max_coord = max(abs(px), abs(py), abs(pz))
-            if max_coord > 1e10:
-                return 0.0
-        
-        # Inside the set - higher than zero for better visualization
-        return 0.05
     
     def _quintic_mandelbulb_standard(self, x, y, z, max_iter):
         """Standard Python implementation of Quintic Mandelbulb with enhanced stability"""
@@ -1530,11 +1236,9 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             y = safe_value(y, 0, -3, 3)
             z = safe_value(z, 0, -3, 3)
             
-            # Use the stable iteration function for better numerical stability if enabled
-            if ENABLE_PATTERN_COHERENCE:
-                return self._cubic_mandelbulb_stable(x, y, z, max_iter)
-            # Otherwise, use optimized implementation if available
-            elif NUMPY_AVAILABLE:
+            # Cubic is generally more stable than quintic, but still needs care
+            # Use optimized implementation if available
+            if NUMPY_AVAILABLE:
                 return self._cubic_mandelbulb_numpy(x, y, z, max_iter)
             else:
                 return self._cubic_mandelbulb_standard(x, y, z, max_iter)
@@ -1542,48 +1246,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         except Exception as e:
             debug_print(f"Cubic mandelbulb calculation error: {e}")
             return 0.3
-            
-    def _cubic_mandelbulb_stable(self, x, y, z, max_iter):
-        """More stable implementation of Cubic Mandelbulb using controlled iterations"""
-        # Original point
-        cx, cy, cz = x, y, z
-        # Start point
-        px, py, pz = 0, 0, 0
-        
-        # Cubic power
-        power = 3
-        
-        # Limit iterations and use bailout
-        iterations = min(max_iter, 100)
-        bailout = 4.0
-        
-        for i in range(iterations):
-            # Check escape condition
-            r2 = px*px + py*py + pz*pz
-            if r2 > bailout:
-                # Enhanced smooth coloring for better gradient
-                smooth_i = i + 1 - math.log(math.log(r2)) / math.log(power)
-                return smooth_i / iterations
-                
-            # Check for numerical instability
-            if math.isnan(r2) or math.isinf(r2):
-                return 0.0
-                
-            # Use stable iteration function to calculate next point
-            nx, ny, nz = stable_mandelbulb_iteration(px, py, pz, power)
-            
-            # Add constant (equivalent to c in standard formulas)
-            px = nx + cx
-            py = ny + cy
-            pz = nz + cz
-            
-            # Additional safety check for extreme values
-            max_coord = max(abs(px), abs(py), abs(pz))
-            if max_coord > 1e10:
-                return 0.0
-        
-        # Inside the set - higher than zero for better visualization
-        return 0.05
             
     def _cubic_mandelbulb_standard(self, x, y, z, max_iter):
         """Standard Python implementation of Cubic Mandelbulb with enhanced stability"""
@@ -1800,10 +1462,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 self.bm = bmesh.from_edit_mesh(self.mesh)
                 ensure_bmesh_lookup_tables(self.bm)
                 
-            # Apply face coherence selection if enabled
-            if ENABLE_PATTERN_COHERENCE:
-                batch = select_coherent_faces(self.bm, batch, max_faces=len(batch))
-                
             # Special batch grouping for optimization
             # Group faces by proximity in 3D space for better cache locality
             grouped_faces = self._group_faces_by_proximity(batch)
@@ -1823,13 +1481,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                         self.face_batches.append(remaining_faces)
                     break
                     
-                # Process each face in the current proximity group 
-                # Collect faces and calculate values with coherence
-                face_list = []
-                face_values = []
-                face_centers = []
-                
-                # First pass - collect all valid faces and calculate initial fractal values
+                # Process each face in the current proximity group
                 for face in face_group:
                     # Skip if face is no longer valid
                     if not validate_face(face):
@@ -1837,7 +1489,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                     
                     # Calculate face center
                     center = face.calc_center_median()
-                    face_centers.append(center)
                     
                     # Enhanced symmetry optimization
                     if scene.use_symmetry:
@@ -1904,16 +1555,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                             center, scene.fractal_type, scene
                         )
                     
-                    # Add to our lists
-                    face_list.append(face)
-                    face_values.append(fractal_value)
-                
-                # Apply pattern coherence if enabled
-                if ENABLE_PATTERN_COHERENCE and len(face_list) > 1:
-                    face_values = apply_coherence_pattern(face_list, face_values, scene.fractal_type)
-                    
-                # Second pass - apply extrusions using coherent values
-                for i, (face, fractal_value) in enumerate(zip(face_list, face_values)):
                     # Apply extrusion based on fractal value with enhanced thresholding
                     # Dynamic threshold based on fractal type - higher for complex 3D fractals
                     threshold = 0.1  # Default
@@ -1922,22 +1563,8 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                         
                     if fractal_value > threshold:
                         try:
-                            # Find neighboring faces for normal alignment
-                            neighboring_faces = []
-                            if ENABLE_PATTERN_COHERENCE:
-                                # Get adjacent faces
-                                for edge in face.edges:
-                                    for adjacent_face in edge.link_faces:
-                                        if adjacent_face != face and adjacent_face in face_list:
-                                            neighboring_faces.append(adjacent_face)
-                                            # Limit number of neighbors to consider
-                                            if len(neighboring_faces) >= MAX_COHERENCE_NEIGHBORS:
-                                                break
-                                    if len(neighboring_faces) >= MAX_COHERENCE_NEIGHBORS:
-                                        break
-                            
                             # Use extrude → insert → extrude pattern with progress updates
-                            success = self.process_complex_pattern(face, fractal_value, scene, neighboring_faces)
+                            success = self.process_complex_pattern(face, fractal_value, scene)
                             if success:
                                 self.extruded_faces += 1
                                 
@@ -2078,17 +1705,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             else:
                 random.seed(None)
             
-            # Update global coherence settings from scene properties
-            global ENABLE_VALUE_NORMALIZATION, ENABLE_PATTERN_COHERENCE, ENABLE_EXTRUSION_CONTROL, NEIGHBOR_INFLUENCE
-            ENABLE_VALUE_NORMALIZATION = scene.fractal_enable_value_normalization
-            ENABLE_PATTERN_COHERENCE = scene.fractal_enable_coherence
-            ENABLE_EXTRUSION_CONTROL = scene.fractal_enable_extrusion_control
-            NEIGHBOR_INFLUENCE = scene.fractal_coherence_strength
-            
-            # Clear cache on execution for fresh start
-            global FRACTAL_CACHE
-            FRACTAL_CACHE.clear()
-            
             # Store original mode and switch to edit mode
             self.original_mode = self.obj.mode
             if self.obj.mode != 'EDIT':
@@ -2120,10 +1736,6 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                     self.report({'WARNING'}, "No valid faces found in mesh.")
                     self.cleanup(context, cancelled=True)
                     return {'CANCELLED'}
-            
-            # Apply coherent face selection if enabled
-            if ENABLE_PATTERN_COHERENCE:
-                faces_to_process = select_coherent_faces(self.bm, faces_to_process, max_faces=face_limit)
             
             # Report total faces
             self.report({'INFO'}, f"Processing {len(faces_to_process)} faces")
@@ -2357,39 +1969,6 @@ def register_properties():
         precision=3
     )
     
-    # Visual coherence properties
-    bpy.types.Scene.fractal_enable_value_normalization = BoolProperty(
-        name="Value Normalization",
-        description="Apply non-linear normalization to fractal values for more predictable results",
-        default=True,
-        update=lambda self, context: setattr(context.scene, "force_coherence_update", True)
-    )
-    bpy.types.Scene.fractal_enable_coherence = BoolProperty(
-        name="Enable Pattern Coherence",
-        description="Create smoother transitions between neighboring faces",
-        default=True,
-        update=lambda self, context: setattr(context.scene, "force_coherence_update", True)
-    )
-    bpy.types.Scene.fractal_coherence_strength = FloatProperty(
-        name="Coherence Strength",
-        description="How strongly neighboring faces influence each other",
-        default=0.3,
-        min=0.0,
-        max=1.0,
-        precision=2,
-        subtype='FACTOR',
-        update=lambda self, context: setattr(context.scene, "force_coherence_update", True)
-    )
-    bpy.types.Scene.fractal_enable_extrusion_control = BoolProperty(
-        name="Controlled Extrusion",
-        description="Use more consistent extrusion parameterization for better results",
-        default=True,
-        update=lambda self, context: setattr(context.scene, "force_coherence_update", True)
-    )
-    bpy.types.Scene.force_coherence_update = BoolProperty(
-        default=False
-    )
-    
     bpy.types.Scene.use_smooth_shading = BoolProperty(
         name="Smooth Shading",
         description="Apply smooth shading to the result",
@@ -2458,13 +2037,6 @@ def unregister_properties():
     del bpy.types.Scene.fractal_first_extrude_amount
     del bpy.types.Scene.fractal_extrude_along_normal
     del bpy.types.Scene.fractal_use_individual_normals
-    
-    # Remove coherence properties
-    del bpy.types.Scene.fractal_enable_value_normalization
-    del bpy.types.Scene.fractal_enable_coherence
-    del bpy.types.Scene.fractal_coherence_strength
-    del bpy.types.Scene.fractal_enable_extrusion_control
-    del bpy.types.Scene.force_coherence_update
 
 classes = (
     FRACTAL_PT_main_panel,
