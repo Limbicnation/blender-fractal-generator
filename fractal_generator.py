@@ -1,13 +1,13 @@
 # pyright: reportMissingImports=false
 bl_info = {
     "name": "Advanced Fractal Geometry Generator",
-    "author": "Your Name",
-    "version": (1, 3),
+    "author": "Gero Doll aka Limbicnation",
+    "version": (1, 4),
     "blender": (4, 3, 0),
     "location": "View3D > Sidebar > Fractal",
     "description": "Generate fractal-based geometry modifications including 3D fractals",
     "warning": "Processing large meshes may be slow",
-    "doc_url": "",
+    "doc_url": "https://github.com/Limbicnation/blender-fractal-generator",
     "category": "Mesh",
 }
 
@@ -41,6 +41,10 @@ def safe_value(value, default, min_val=None, max_val=None):
     """Safely clamp a value within bounds to prevent instability"""
     if value is None or math.isnan(value) or math.isinf(value):
         return default
+    
+    # Handle extreme values that might cause numerical issues
+    if abs(value) > 1e10:  # Detect extremely large values
+        return default
         
     result = value
     if min_val is not None:
@@ -50,19 +54,59 @@ def safe_value(value, default, min_val=None, max_val=None):
     return result
 
 def check_system_resources():
-    """Check if system has enough resources to continue processing - with graceful fallback"""
+    """Check if system has enough resources to continue processing - with enhanced system monitoring"""
     # Try to use psutil if available, but continue without it if not installed
     try:
         import psutil
         
-        # Check available memory (at least 500MB free)
+        # Check available memory with adaptive threshold based on system total memory
         try:
             mem = psutil.virtual_memory()
-            if mem.available < 500 * 1024 * 1024:  # 500MB in bytes
-                return False, "Low memory"
+            total_gb = mem.total / (1024**3)  # Total RAM in GB
+            
+            # Adaptive minimum free memory based on system specs
+            # Systems with more RAM can afford to use more
+            if total_gb >= 32:  # High-end systems
+                min_free_mb = 1000  # Need at least 1GB free
+            elif total_gb >= 16:  # Mid-range systems
+                min_free_mb = 750   # Need at least 750MB free
+            elif total_gb >= 8:   # Entry-level systems
+                min_free_mb = 500   # Need at least 500MB free
+            else:                  # Low-spec systems
+                min_free_mb = 350   # Need at least 350MB free
+                
+            if mem.available < min_free_mb * 1024 * 1024:  # Convert MB to bytes
+                free_mb = mem.available / (1024 * 1024)
+                return False, f"Low memory ({free_mb:.0f}MB available, need {min_free_mb}MB)"
+                
+            # Also check for critically high memory usage percentage
+            if mem.percent > 95:  # More than 95% memory used
+                return False, f"Critical memory usage ({mem.percent:.0f}%)"
         except Exception as e:
             debug_print(f"Memory check error: {e}")
             pass  # Continue even if memory check fails
+            
+        # Check CPU usage - pause if system is already heavily loaded
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)  # Quick check
+            if cpu_percent > 95:  # CPU is already very heavily loaded
+                return False, f"High CPU usage ({cpu_percent:.0f}%)"
+        except Exception as e:
+            debug_print(f"CPU check error: {e}")
+            pass  # Continue even if CPU check fails
+            
+        # Additional check for thermal throttling on systems that support it
+        try:
+            if hasattr(psutil, "sensors_temperatures"):  # Not available on all platforms
+                temps = psutil.sensors_temperatures()
+                for name, entries in temps.items():
+                    for entry in entries:
+                        # If any critical temperature is reached
+                        if entry.critical is not None and entry.current >= entry.critical:
+                            return False, f"Critical temperature reached ({entry.label})"
+        except Exception as e:
+            debug_print(f"Temperature check error: {e}")
+            pass  # Continue even if temperature check fails
             
         return True, ""
         
@@ -72,13 +116,13 @@ def check_system_resources():
         return True, ""
 
 # Global constants for safety
-MAX_ALLOWED_FACES = 10000  # Prevents processing too many faces at once
-DEFAULT_BATCH_SIZE = 500  # Process faces in batches to avoid memory spikes
+MAX_ALLOWED_FACES = 15000  # Prevents processing too many faces at once (increased limit)
+DEFAULT_BATCH_SIZE = 750  # Process faces in batches to avoid memory spikes (optimized)
 DEBUG = False  # Set to True for additional console output
-MAX_SAFE_VERTICES = 1000000  # Maximum vertex count to prevent crashes
+MAX_SAFE_VERTICES = 1500000  # Maximum vertex count to prevent crashes (increased for modern systems)
 
 # Value caching system for fractal calculations
-FRACTAL_CACHE_SIZE = 1000  # Maximum number of cached fractal values
+FRACTAL_CACHE_SIZE = 2000  # Maximum number of cached fractal values (increased for better performance)
 FRACTAL_CACHE = {}  # Global cache dictionary
 FRACTAL_CACHE_HITS = 0  # For diagnostics
 FRACTAL_CACHE_PRECISION = 3  # Decimal precision for cache keys
@@ -112,7 +156,11 @@ def cached_fractal_calc(func):
         
         for arg in args:
             if isinstance(arg, (int, float)):
-                rounded_args.append(round(arg, FRACTAL_CACHE_PRECISION))
+                # Safely handle invalid values
+                if math.isnan(arg) or math.isinf(arg):
+                    rounded_args.append(0)  # Default safe value
+                else:
+                    rounded_args.append(round(arg, FRACTAL_CACHE_PRECISION))
             else:
                 rounded_args.append(arg)
                 
@@ -129,12 +177,24 @@ def cached_fractal_calc(func):
         # Cache the result if we haven't exceeded cache size
         if len(FRACTAL_CACHE) < FRACTAL_CACHE_SIZE:
             FRACTAL_CACHE[cache_key] = result
-        elif len(FRACTAL_CACHE) >= FRACTAL_CACHE_SIZE and random.random() < 0.1:
-            # Randomly replace entries once cache is full to avoid staleness
-            keys = list(FRACTAL_CACHE.keys())
-            if keys:
-                del FRACTAL_CACHE[random.choice(keys)]
-                FRACTAL_CACHE[cache_key] = result
+        elif len(FRACTAL_CACHE) >= FRACTAL_CACHE_SIZE:
+            # Improved cache management: remove least recently used items
+            if random.random() < 0.25:  # Increased probability for more regular cleanup
+                # Remove 10% of cache entries when full for better performance
+                keys = list(FRACTAL_CACHE.keys())
+                if keys:
+                    to_remove = min(int(len(keys) * 0.1), 100)  # Remove up to 10% or 100 items
+                    for _ in range(to_remove):
+                        del FRACTAL_CACHE[random.choice(keys)]
+                    
+                    # Now add the new result
+                    FRACTAL_CACHE[cache_key] = result
+            else:
+                # Still add current result by removing a random entry
+                keys = list(FRACTAL_CACHE.keys())
+                if keys:
+                    del FRACTAL_CACHE[random.choice(keys)]
+                    FRACTAL_CACHE[cache_key] = result
                 
         return result
     
@@ -178,25 +238,94 @@ def align_extrusion_normal(face, face_normal, neighboring_faces):
 
 def get_coherent_extrusion(face, face_normal, neighbors, current_level):
     """Calculate extrusion parameters that ensure coherence with neighboring faces.
-    Creates more visually pleasing, organized structures."""
+    Creates more visually pleasing, organized structures with enhanced coherence."""
     # Base extrusion length with progressive scaling
     extrusion_length = progressive_scale_extrusion(current_level, 0.15)
     
+    # Use adaptive neighbor influence based on recursion level
+    # Deeper levels benefit from more individual variation
+    neighbor_weight = max(0.1, NEIGHBOR_INFLUENCE * (0.9 ** current_level))
+    
     # If we have neighbors, blend our normal with neighbor normals
     if neighbors:
-        # Calculate average neighbor normal
+        # Calculate weighted average neighbor normal based on proximity
         avg_normal = Vector((0, 0, 0))
-        for neighbor in neighbors:
-            if neighbor.normal.length > 0.0001:
-                avg_normal += neighbor.normal
+        total_weight = 0.0
         
-        if avg_normal.length > 0.0001:
+        # Limit number of neighbors to consider for better performance
+        considered_neighbors = neighbors[:MAX_COHERENCE_NEIGHBORS] if len(neighbors) > MAX_COHERENCE_NEIGHBORS else neighbors
+        
+        # Get face center for proximity weighting
+        try:
+            face_center = face.calc_center_median()
+            for neighbor in considered_neighbors:
+                if neighbor.normal.length > 0.0001:
+                    # Calculate distance-based weight (closer neighbors have more influence)
+                    try:
+                        neighbor_center = neighbor.calc_center_median()
+                        dist = (neighbor_center - face_center).length
+                        # Inverse square influence falloff (1/d²)
+                        if dist > 0.0001:
+                            weight = 1.0 / (dist * dist)
+                        else:
+                            weight = 100.0  # High weight for very close neighbors
+                        
+                        avg_normal += neighbor.normal * weight
+                        total_weight += weight
+                    except Exception:
+                        # Fallback to uniform weighting if center calculation fails
+                        avg_normal += neighbor.normal
+                        total_weight += 1.0
+        except Exception:
+            # Fallback to simple averaging if face center calculation fails
+            for neighbor in considered_neighbors:
+                if neighbor.normal.length > 0.0001:
+                    avg_normal += neighbor.normal
+                    total_weight += 1.0
+        
+        if avg_normal.length > 0.0001 and total_weight > 0.0001:
+            # Normalize the weighted average
+            avg_normal = avg_normal / total_weight
             avg_normal.normalize()
+            
+            # Calculate face normal angle stability
+            # Faces with more consistent neighbor normals get higher coherence
+            try:
+                normal_angles = []
+                for neighbor in considered_neighbors:
+                    if neighbor.normal.length > 0.0001:
+                        angle = face_normal.angle(neighbor.normal) 
+                        if not math.isnan(angle) and not math.isinf(angle):
+                            normal_angles.append(angle)
+                
+                if normal_angles:
+                    # Calculate angle variance (high variance = less coherence)
+                    avg_angle = sum(normal_angles) / len(normal_angles)
+                    angle_variance = sum((angle - avg_angle)**2 for angle in normal_angles) / len(normal_angles)
+                    
+                    # Adapt coherence based on angle variance
+                    coherence_factor = 1.0 / (1.0 + angle_variance)  # Range 0-1, higher for more consistent angles
+                    neighbor_weight *= coherence_factor + 0.5  # Scale between 50-150% of base weight
+            except Exception:
+                # Continue with default weight if angle calculations fail
+                pass
+                
+            # Add a subtle randomization factor for more organic appearance
+            # Hash the face center coordinates for deterministic randomness
+            try:
+                center_hash = hash(str(face_center)) % 1000 / 1000.0  # Range 0-1
+                neighbor_weight *= 0.85 + center_hash * 0.3  # Range 85-115% of base weight
+            except Exception:
+                pass
+            
             # Blend face normal with average neighbor normal
-            # Use 70% face normal, 30% neighbor influence for subtle coherence
-            blended_normal = (face_normal * 0.7 + avg_normal * 0.3)
-            blended_normal.normalize()
-            return blended_normal * extrusion_length
+            # Implement coherence transition for more visually pleasing result
+            face_weight = 1.0 - neighbor_weight
+            blended_normal = (face_normal * face_weight + avg_normal * neighbor_weight)
+            
+            if blended_normal.length > 0.0001:
+                blended_normal.normalize()
+                return blended_normal * extrusion_length
     
     # Default fallback if no valid neighbors
     return face_normal * extrusion_length
@@ -206,38 +335,55 @@ def validate_face(face):
     if not face or not hasattr(face, "is_valid") or not face.is_valid:
         return False
     try:
-        # Skip very degenerate faces
-        if face.calc_area() < 0.00001:
+        # Skip very degenerate faces with stricter threshold
+        try:
+            area = face.calc_area()
+            if area < 0.00001 or math.isnan(area) or math.isinf(area):
+                return False
+        except Exception:
             return False
-        # Skip faces with too many vertices (can cause issues)
-        if len(face.verts) > 100:
+            
+        # Skip faces with too many vertices (reduced from 100 for better stability)
+        if len(face.verts) > 50:
             return False
-        # Check for valid normal
-        if face.normal.length < 0.0001:
+            
+        # Check for valid normal with improved testing
+        try:
+            normal_length = face.normal.length
+            if normal_length < 0.0001 or math.isnan(normal_length) or math.isinf(normal_length):
+                return False
+        except Exception:
             return False
         
         # Additional checks for face stability
         # Check for extremely acute angles - these can cause numerical issues
-        for edge in face.edges:
-            if len(edge.link_faces) < 2:
-                continue  # Skip boundary edges
-                
-            # Calculate angle between face normals - reject faces with very sharp edges
-            # that would create instability in subdivision operations
-            face1, face2 = edge.link_faces
-            if face1 and face2:
-                try:
-                    angle = face1.normal.angle(face2.normal)
-                    # Reject faces with very acute or very obtuse angles
-                    if angle > 2.8:  # Close to pi (180 degrees)
-                        return False
-                except:
-                    pass
+        try:
+            for edge in face.edges:
+                if len(edge.link_faces) < 2:
+                    continue  # Skip boundary edges
+                    
+                # Calculate angle between face normals - reject faces with very sharp edges
+                # that would create instability in subdivision operations
+                face1, face2 = edge.link_faces
+                if face1 and face2 and face1.is_valid and face2.is_valid:
+                    try:
+                        angle = face1.normal.angle(face2.normal)
+                        # Reject faces with very acute or very obtuse angles - stricter range
+                        if angle > 2.7 or angle < 0.1:  # Avoid both very sharp and very flat angles
+                            return False
+                    except Exception:
+                        pass
+        except Exception:
+            # If edge check fails, continue with other checks
+            pass
         
         # Check aspect ratio - extremely long thin faces can cause issues
         try:
             # Simple aspect ratio check - get rough bounds
-            verts = [v.co for v in face.verts]
+            verts = [v.co for v in face.verts if v.is_valid]
+            if not verts or len(verts) < 3:  # Need at least 3 vertices for a valid face
+                return False
+                
             min_x = min(v.x for v in verts)
             max_x = max(v.x for v in verts)
             min_y = min(v.y for v in verts)
@@ -245,15 +391,60 @@ def validate_face(face):
             min_z = min(v.z for v in verts)
             max_z = max(v.z for v in verts)
             
-            width = max(max_x - min_x, max_y - min_y, max_z - min_z)
-            height = min(max_x - min_x, max_y - min_y, max_z - min_z)
-            if height > 0 and width / height > 50:  # Very extreme aspect ratio
+            # Check for degenerate dimensions
+            x_span = max_x - min_x
+            y_span = max_y - min_y
+            z_span = max_z - min_z
+            
+            # Check for near-zero dimensions which can cause issues
+            if x_span < 1e-6 and y_span < 1e-6 or \
+               x_span < 1e-6 and z_span < 1e-6 or \
+               y_span < 1e-6 and z_span < 1e-6:
                 return False
-        except:
+            
+            # More robust aspect ratio calculation
+            spans = [x_span, y_span, z_span]
+            spans.sort()  # Sort from smallest to largest
+            
+            # Avoid division by zero with safety check
+            if spans[0] > 1e-6:  # Smallest dimension must be non-zero
+                aspect_ratio = spans[2] / spans[0]  # Largest divided by smallest
+                if aspect_ratio > 40:  # Reduced from 50 for better stability
+                    return False
+        except Exception:
+            # If aspect ratio check fails, fall back to simpler check
+            try:
+                if face.calc_perimeter() < 1e-5:
+                    return False
+            except:
+                pass
+            
+        # Check for self-intersecting faces
+        try:
+            # Simple self-intersection check by testing if normal is consistent
+            if len(face.verts) > 3:
+                # For quads and n-gons, check if triangulation would create consistent normals
+                verts = [v.co for v in face.verts]
+                centroid = sum((v for v in verts), Vector((0,0,0))) / len(verts)
+                # Check if all triangles formed with the centroid have consistent normal direction
+                last_dot = None
+                for i in range(len(verts)):
+                    v1 = verts[i]
+                    v2 = verts[(i+1) % len(verts)]
+                    tri_normal = (v2 - v1).cross(centroid - v1)
+                    if tri_normal.length > 0.0001:
+                        tri_normal.normalize()
+                        dot = tri_normal.dot(face.normal)
+                        # Check for inconsistent normal direction
+                        if last_dot is not None and dot * last_dot < 0:
+                            return False  # Found inconsistent normals, likely self-intersecting
+                        last_dot = dot
+        except Exception:
+            # If self-intersection check fails, continue
             pass
             
         return True
-    except:
+    except Exception:
         return False
 
 def ensure_bmesh_lookup_tables(bm):
@@ -1262,7 +1453,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         return 0.05
         
     def _quintic_mandelbulb_numpy(self, x, y, z, max_iter):
-        """NumPy optimized implementation of Quintic Mandelbulb"""
+        """NumPy optimized implementation of Quintic Mandelbulb with enhanced visuals"""
         # Initialize point
         c = np.array([x, y, z], dtype=np.float64)  # Original point as np array
         p = np.zeros(3, dtype=np.float64)  # Start at origin
@@ -1274,15 +1465,54 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         # Limit iterations for safety
         iterations = min(max_iter, 100)
         
+        # Enhanced coloring with multiple orbital traps
+        min_dist_to_origin = float('inf')  # Distance to origin trap
+        min_dist_to_point = float('inf')  # Distance to attractor point trap
+        attractor_point = np.array([0.5, 0.5, 0.5], dtype=np.float64)  # Arbitrary attractor point
+        
+        # Store orbit information for more interesting patterns
+        last_orbit_directions = np.zeros((3, 3), dtype=np.float64)  # Store last 3 movement directions
+        orbit_index = 0
+        
         for i in range(iterations):
             # Calculate squared radius
             r2 = np.sum(p**2)
             
+            # Update orbital traps for enhanced coloring
+            min_dist_to_origin = min(min_dist_to_origin, r2)
+            dist_to_point = np.sum((p - attractor_point)**2)
+            min_dist_to_point = min(min_dist_to_point, dist_to_point)
+            
             # Early bailout check
             if r2 > bailout:
-                # NumPy optimized smooth coloring
+                # NumPy optimized smooth coloring with enhanced factors
                 smooth_i = i + 1 - np.log(np.log(r2)) / np.log(power)
-                return float(smooth_i / iterations)
+                base_color = float(smooth_i / iterations)
+                
+                # Blend with orbital trap data for more complex patterns
+                trap_factor1 = 1.0 - min(1.0, min_dist_to_origin / bailout)
+                trap_factor2 = 1.0 - min(1.0, min_dist_to_point / bailout) 
+                
+                # Complex blending of factors for rich detailing
+                trap_weight = 0.35  # Adjust influence of traps (0-1)
+                orbit_weight = 0.15  # Adjust influence of orbit complexity
+                
+                # Calculate orbit complexity factor (how chaotic the orbit is)
+                orbit_complexity = 0.0
+                if i > 3:  # Only use if we have enough orbit history
+                    # Analyze the last movement directions for non-linear patterns
+                    # More perpendicular movements = more chaotic/complex orbit
+                    for j in range(2):
+                        dot = np.abs(np.sum(last_orbit_directions[j] * last_orbit_directions[j+1]))
+                        if dot > 1e-6:  # Avoid division by zero
+                            # Lower dot product means more perpendicular (complex) movement
+                            orbit_complexity += 1.0 - min(1.0, dot)
+                    orbit_complexity /= 2.0  # Normalize
+                
+                # Final color with multi-factor blending
+                return base_color * (1.0 - trap_weight - orbit_weight) + \
+                       ((trap_factor1 + trap_factor2) / 2.0) * trap_weight + \
+                       orbit_complexity * orbit_weight
             
             # Check for numerical instability
             if np.isnan(r2) or np.isinf(r2):
@@ -1302,12 +1532,15 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 theta = np.arctan2(xy_dist, p[2])
                 phi = np.arctan2(p[1], p[0])
             
+            # Store previous position for orbit tracking
+            p_old = p.copy()
+            
             # Calculate new point in spherical coords
             r_pow = min(r**power, 1000.0)
             theta_new = theta * power
             phi_new = phi * power
             
-            # Convert back to cartesian with NumPy functions
+            # Convert back to cartesian with NumPy functions and safety checks
             sin_theta = np.sin(theta_new)
             cos_theta = np.cos(theta_new)
             sin_phi = np.sin(phi_new)
@@ -1330,8 +1563,20 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 p = p_new * (1e10 / max_coord)
             else:
                 p = p_new
+                
+            # Update orbit tracking - store movement direction
+            movement = p - p_old
+            movement_length = np.sqrt(np.sum(movement**2))
+            if movement_length > 1e-10:  # Only track significant movements
+                # Store normalized movement direction
+                last_orbit_directions[orbit_index] = movement / movement_length
+                orbit_index = (orbit_index + 1) % 3
         
-        # Inside the set
+        # Inside the set - use orbital trap data for interior patterning
+        # Creates more visually interesting "inside" regions
+        if min_dist_to_origin < bailout:
+            trap_blend = 0.5 * (min_dist_to_origin / bailout) + 0.5 * (min_dist_to_point / bailout)
+            return 0.05 + trap_blend * 0.15  # Range from 0.05 to 0.20
         return 0.05
     
     @cached_fractal_calc
@@ -1367,15 +1612,26 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         # Limit iterations for safety
         iterations = min(max_iter, 100)
         
+        # Orbital trap for enhanced coloring variation (stores minimum distance to origin)
+        min_dist_to_origin = float('inf')
+        
         for i in range(iterations):
             # Calculate squared radius with optimized pow
             r2 = px*px + py*py + pz*pz
             
+            # Update orbital trap for enhanced visual interest
+            min_dist_to_origin = min(min_dist_to_origin, r2)
+            
             # Early bailout check with smooth coloring
             if r2 > bailout:
                 # Enhanced smooth coloring for better visualization
+                # This version uses both iteration count and orbital trap data
+                # for more detailed and visually appealing patterns
                 smooth_i = i + 1 - math.log(math.log(r2)) / math.log(power)
-                return smooth_i / iterations
+                trap_influence = 0.3  # Control orbital trap influence (0-1)
+                trap_factor = 1.0 - min(1.0, min_dist_to_origin / bailout) * trap_influence
+                # Blend trap factor with iteration factor for richer detailing
+                return (smooth_i / iterations) * (1.0 - trap_influence) + trap_factor * trap_influence
             
             # Check for NaN or inf
             if math.isnan(r2) or math.isinf(r2):
@@ -1391,14 +1647,14 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 r = math.sqrt(r2)
                 
                 # More numerically stable theta calculation
-                if pz == 0:
+                if abs(pz) < 1e-10:  # Stricter zero check
                     theta = math.pi / 2  # 90 degrees
                 else:
                     xy_dist = math.sqrt(px*px + py*py)
                     theta = math.atan2(xy_dist, pz)
                 
                 # More numerically stable phi calculation
-                if px == 0:
+                if abs(px) < 1e-10:  # Stricter zero check
                     phi = math.pi / 2 if py > 0 else -math.pi / 2
                 else:
                     phi = math.atan2(py, px)
@@ -1414,9 +1670,20 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             
             # Safer trig functions with bounds checking
             sin_theta = math.sin(theta_new)
+            if math.isnan(sin_theta) or math.isinf(sin_theta):
+                sin_theta = 0
+            
             cos_theta = math.cos(theta_new)
+            if math.isnan(cos_theta) or math.isinf(cos_theta):
+                cos_theta = 1
+            
             sin_phi = math.sin(phi_new)
+            if math.isnan(sin_phi) or math.isinf(sin_phi):
+                sin_phi = 0
+            
             cos_phi = math.cos(phi_new)
+            if math.isnan(cos_phi) or math.isinf(cos_phi):
+                cos_phi = 1
             
             # Convert back to cartesian coords
             px_new = r_pow * sin_theta * cos_phi + cx
@@ -1438,7 +1705,10 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             else:
                 px, py, pz = px_new, py_new, pz_new
         
-        # Inside the set - with slight offset from zero for better visualization
+        # Inside the set - use orbital trap for non-uniform interior coloring
+        # This creates more variation in the "inside" regions instead of uniform color
+        if min_dist_to_origin < bailout:
+            return 0.05 + (min_dist_to_origin / bailout) * 0.1
         return 0.05
         
     def _cubic_mandelbulb_numpy(self, x, y, z, max_iter):
@@ -1744,52 +2014,151 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             if len(faces) < 20:
                 return [faces]
                 
-            # Calculate the center of each face
+            # Calculate the center of each face with improved error handling
             face_centers = []
             for face in faces:
-                if validate_face(face):
-                    center = face.calc_center_median()
-                    face_centers.append((face, center))
-                    
-            # Simple grouping by octants (dividing 3D space into 8 regions)
-            # This is faster than clustering algorithms for our purpose
-            octants = [[] for _ in range(8)]
+                try:
+                    if validate_face(face):
+                        center = face.calc_center_median()
+                        # Check for invalid center coordinates
+                        if not (math.isnan(center.x) or math.isnan(center.y) or math.isnan(center.z) or
+                                math.isinf(center.x) or math.isinf(center.y) or math.isinf(center.z)):
+                            face_centers.append((face, center))
+                except Exception:
+                    continue  # Skip faces with calculation errors
             
-            # Determine the center of all faces
-            if face_centers:
-                avg_x = sum(c.x for _, c in face_centers) / len(face_centers)
-                avg_y = sum(c.y for _, c in face_centers) / len(face_centers)
-                avg_z = sum(c.z for _, c in face_centers) / len(face_centers)
+            # If we have too few valid faces, process as one group
+            if len(face_centers) < 10:
+                valid_faces = [f for f, _ in face_centers]
+                return [valid_faces] if valid_faces else [faces]
+            
+            # Choose grouping strategy based on number of faces to optimize
+            if len(face_centers) < 100:
+                # For small to medium batches: Use octant spatial division (faster)
+                return self._group_by_octants(face_centers, max_groups)
+            else:
+                # For large batches: Use K-means inspired clustering (more balanced)
+                return self._group_by_kmeans(face_centers, min(max_groups, 8))
                 
-                # Group faces by octant relative to the average center
-                for face, center in face_centers:
-                    # Determine octant (0-7) based on position relative to average
-                    octant_idx = 0
-                    if center.x >= avg_x: octant_idx |= 1
-                    if center.y >= avg_y: octant_idx |= 2
-                    if center.z >= avg_z: octant_idx |= 4
-                    
-                    octants[octant_idx].append(face)
-            
-            # Filter out empty groups and ensure we don't have too many groups
-            groups = [group for group in octants if group]
-            
-            # If we have too many small groups, consolidate them
-            if len(groups) > max_groups:
-                # Sort groups by size and keep the largest ones
-                groups.sort(key=len, reverse=True)
-                groups = groups[:max_groups]
-                
-            # If no valid groups were created, return original faces as one group
-            if not groups:
-                return [faces]
-                
-            return groups
-            
         except Exception as e:
             debug_print(f"Error grouping faces: {e}")
             # Fall back to single group if grouping fails
             return [faces]
+            
+    def _group_by_octants(self, face_centers, max_groups):
+        """Group faces by octants of 3D space for simpler spatial partitioning"""
+        # Simple grouping by octants (dividing 3D space into 8 regions)
+        # This is faster than clustering algorithms for our purpose
+        octants = [[] for _ in range(8)]
+        
+        # Determine the center of all faces
+        if face_centers:
+            avg_x = sum(c.x for _, c in face_centers) / len(face_centers)
+            avg_y = sum(c.y for _, c in face_centers) / len(face_centers)
+            avg_z = sum(c.z for _, c in face_centers) / len(face_centers)
+            
+            # Group faces by octant relative to the average center
+            for face, center in face_centers:
+                # Determine octant (0-7) based on position relative to average
+                octant_idx = 0
+                if center.x >= avg_x: octant_idx |= 1
+                if center.y >= avg_y: octant_idx |= 2
+                if center.z >= avg_z: octant_idx |= 4
+                
+                octants[octant_idx].append(face)
+        
+        # Filter out empty groups and ensure we don't have too many groups
+        groups = [group for group in octants if group]
+        
+        # If we have too many small groups, consolidate them
+        if len(groups) > max_groups:
+            # Sort groups by size and keep the largest ones
+            groups.sort(key=len, reverse=True)
+            # Keep larger groups as-is
+            result_groups = groups[:max_groups-1]
+            # Combine all remaining small groups into one
+            remaining = []
+            for i in range(max_groups-1, len(groups)):
+                remaining.extend(groups[i])
+            if remaining:
+                result_groups.append(remaining)
+            return result_groups
+        
+        # If no valid groups were created, return all valid faces as one group
+        if not groups:
+            return [[face for face, _ in face_centers]]
+            
+        return groups
+        
+    def _group_by_kmeans(self, face_centers, k):
+        """Group faces using a simplified K-means inspired clustering"""
+        # Extract all faces and centers
+        faces = [f for f, _ in face_centers]
+        centers = [c for _, c in face_centers]
+        
+        # Handle edge cases
+        if len(centers) <= k:
+            return [faces]  # Just one group if we have fewer faces than clusters
+        
+        # Initialize centroids by selecting k faces that are far apart
+        # This is a much faster alternative to K-means++ initialization
+        centroids = []
+        
+        # First centroid: select a random face
+        first_idx = random.randint(0, len(centers) - 1)
+        centroids.append(centers[first_idx])
+        
+        # Remaining centroids: choose points far from existing centroids
+        for _ in range(1, k):
+            # Find the face that has the maximum minimum distance to existing centroids
+            max_min_dist = -float('inf')
+            next_idx = -1
+            
+            # Only check a sample of faces for efficiency with large meshes
+            sample_size = min(100, len(centers))
+            sample_indices = random.sample(range(len(centers)), sample_size)
+            
+            for idx in sample_indices:
+                # Calculate minimum distance to existing centroids
+                min_dist = float('inf')
+                for c in centroids:
+                    # Calculate Manhattan distance (faster than Euclidean)
+                    dist = abs(centers[idx].x - c.x) + abs(centers[idx].y - c.y) + abs(centers[idx].z - c.z)
+                    min_dist = min(min_dist, dist)
+                    
+                # Update maximum minimum distance
+                if min_dist > max_min_dist:
+                    max_min_dist = min_dist
+                    next_idx = idx
+                    
+            # Add the chosen point as a new centroid
+            if next_idx != -1:
+                centroids.append(centers[next_idx])
+            
+        # Assign each face to nearest centroid (single pass, no iteration for speed)
+        clusters = [[] for _ in range(k)]
+        for i, center in enumerate(centers):
+            # Find nearest centroid
+            min_dist = float('inf')
+            nearest = 0
+            for j, centroid in enumerate(centroids):
+                # Use Manhattan distance for faster computation
+                dist = abs(center.x - centroid.x) + abs(center.y - centroid.y) + abs(center.z - centroid.z)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest = j
+                    
+            # Assign face to cluster
+            clusters[nearest].append(faces[i])
+            
+        # Filter out empty clusters
+        clusters = [c for c in clusters if c]
+        
+        # If we ended up with no clusters, return all faces as one group
+        if not clusters:
+            return [faces]
+            
+        return clusters
     
     def execute(self, context):
         """Main execute function"""
