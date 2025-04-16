@@ -127,6 +127,20 @@ Changing the seed values creates entirely different patterns. The "Randomize See
 - **Processing seems stuck**: For large operations, check the progress bar or use the Cancel button
 - **Out of memory errors**: Try enabling batch processing with smaller batch sizes
 
+## Version History
+
+### Version 1.4
+- Enhanced stability with improved error handling and face validation
+- Optimized fractal calculation with larger cache and better memory management
+- Added orbital trap-based coloring for more visually interesting fractals
+- Implemented improved coherent extrusion with adaptive normal blending
+- Upgraded face clustering for better processing efficiency
+- Added advanced system resource monitoring with adaptive thresholds
+- Increased face and vertex limits for modern systems
+
+### Version 1.3
+- Added progressive scaling and coherent extrusion for improved fractal visuals
+
 ## Compatible Blender Versions
 
 This addon is designed for Blender 4.3.0 and newer.
