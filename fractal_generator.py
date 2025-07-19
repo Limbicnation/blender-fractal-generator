@@ -138,6 +138,10 @@ FRACTAL_CACHE = {}  # Global cache dictionary
 FRACTAL_CACHE_HITS = 0  # For diagnostics
 FRACTAL_CACHE_PRECISION = 3  # Decimal precision for cache keys
 
+# Face validation cache for avoiding repeated validation calls
+FACE_VALIDATION_CACHE = {}  # Cache for face validation results
+FACE_VALIDATION_CACHE_SIZE = 1000  # Maximum number of cached validation results
+
 # Constants for fractal calculation optimization
 MANDELBROT_CARDIOID_PERIOD2_OPTIMIZATION = True  # Early bailout for main cardioid and period-2 bulb
 ADAPTIVE_ITERATIONS = True  # Use variable iteration count based on zoom level
@@ -222,7 +226,15 @@ def progressive_scale_extrusion(extrusion_level, base_scale=1.0):
     return max(0.05, scale)
 
 def align_extrusion_normal(face_normal, neighboring_faces):
-    """Adjust extrusion direction for better visual coherence with neighbors"""
+    """Adjust extrusion direction for better visual coherence with neighbors.
+    
+    Args:
+        face_normal (Vector): The normal vector of the current face
+        neighboring_faces (list): Collection of neighboring face objects with .normal attributes
+        
+    Returns:
+        Vector: Blended normal vector adjusted for visual coherence with neighbors
+    """
     if not neighboring_faces:
         return face_normal
     
@@ -341,30 +353,47 @@ def get_coherent_extrusion(face, face_normal, neighbors, current_level):
     # Default fallback if no valid neighbors
     return face_normal * extrusion_length
 
+def _cache_face_validation_result(face_key, result):
+    """Helper function to cache face validation results"""
+    global FACE_VALIDATION_CACHE
+    if len(FACE_VALIDATION_CACHE) < FACE_VALIDATION_CACHE_SIZE:
+        FACE_VALIDATION_CACHE[face_key] = result
+    elif len(FACE_VALIDATION_CACHE) >= FACE_VALIDATION_CACHE_SIZE:
+        # Simple cache eviction - clear when full
+        FACE_VALIDATION_CACHE.clear()
+        FACE_VALIDATION_CACHE[face_key] = result
+    return result
+
 def validate_face(face):
     """Check if a face is valid for processing with enhanced stability checks"""
     if not face or not hasattr(face, "is_valid") or not face.is_valid:
         return False
+        
+    # Check cache first using face index as key
+    global FACE_VALIDATION_CACHE
+    face_key = face.index
+    if face_key in FACE_VALIDATION_CACHE:
+        return FACE_VALIDATION_CACHE[face_key]
     try:
         # Skip very degenerate faces with stricter threshold
         try:
             area = face.calc_area()
             if area < 0.00001 or math.isnan(area) or math.isinf(area):
-                return False
+                return _cache_face_validation_result(face_key, False)
         except Exception:
-            return False
+            return _cache_face_validation_result(face_key, False)
             
         # Skip faces with too many vertices (reduced from 100 for better stability)
         if len(face.verts) > 50:
-            return False
+            return _cache_face_validation_result(face_key, False)
             
         # Check for valid normal with improved testing
         try:
             normal_length = face.normal.length
             if normal_length < 0.0001 or math.isnan(normal_length) or math.isinf(normal_length):
-                return False
+                return _cache_face_validation_result(face_key, False)
         except Exception:
-            return False
+            return _cache_face_validation_result(face_key, False)
         
         # Additional checks for face stability
         # Check for extremely acute angles - these can cause numerical issues
@@ -381,7 +410,7 @@ def validate_face(face):
                         angle = face1.normal.angle(face2.normal)
                         # Reject faces with very acute or very obtuse angles - stricter range
                         if angle > 2.7 or angle < 0.1:  # Avoid both very sharp and very flat angles
-                            return False
+                            return _cache_face_validation_result(face_key, False)
                     except Exception:
                         pass
         except Exception:
@@ -393,7 +422,7 @@ def validate_face(face):
             # Simple aspect ratio check - get rough bounds
             verts = [v.co for v in face.verts if v.is_valid]
             if not verts or len(verts) < 3:  # Need at least 3 vertices for a valid face
-                return False
+                return _cache_face_validation_result(face_key, False)
                 
             min_x = min(v.x for v in verts)
             max_x = max(v.x for v in verts)
@@ -411,7 +440,7 @@ def validate_face(face):
             if x_span < 1e-6 and y_span < 1e-6 or \
                x_span < 1e-6 and z_span < 1e-6 or \
                y_span < 1e-6 and z_span < 1e-6:
-                return False
+                return _cache_face_validation_result(face_key, False)
             
             # More robust aspect ratio calculation
             spans = [x_span, y_span, z_span]
@@ -421,12 +450,12 @@ def validate_face(face):
             if spans[0] > 1e-6:  # Smallest dimension must be non-zero
                 aspect_ratio = spans[2] / spans[0]  # Largest divided by smallest
                 if aspect_ratio > 40:  # Reduced from 50 for better stability
-                    return False
+                    return _cache_face_validation_result(face_key, False)
         except Exception:
             # If aspect ratio check fails, fall back to simpler check
             try:
                 if face.calc_perimeter() < 1e-5:
-                    return False
+                    return _cache_face_validation_result(face_key, False)
             except:
                 pass
             
@@ -448,15 +477,15 @@ def validate_face(face):
                         dot = tri_normal.dot(face.normal)
                         # Check for inconsistent normal direction
                         if last_dot is not None and dot * last_dot < 0:
-                            return False  # Found inconsistent normals, likely self-intersecting
+                            return _cache_face_validation_result(face_key, False)  # Found inconsistent normals, likely self-intersecting
                         last_dot = dot
         except Exception:
             # If self-intersection check fails, continue
             pass
             
-        return True
+        return _cache_face_validation_result(face_key, True)
     except Exception:
-        return False
+        return _cache_face_validation_result(face_key, False)
 
 def ensure_bmesh_lookup_tables(bm):
     """Ensure all BMesh lookup tables are valid"""
@@ -470,6 +499,10 @@ def ensure_bmesh_lookup_tables(bm):
 
 def ensure_geometry_compatibility(obj):
     """Ensure the geometry is compatible with fractal processing for all Blender primitives"""
+    # Store original state to restore later
+    original_active = bpy.context.view_layer.objects.active
+    original_mode = obj.mode
+    
     try:
         # Check if object is a mesh
         if obj.type != 'MESH':
@@ -482,13 +515,17 @@ def ensure_geometry_compatibility(obj):
         # Check for common issues with different primitive types
         mesh = obj.data
         
-        # For UV spheres and ico spheres - check for poles (single vertex faces)
-        pole_faces = [p for p in mesh.polygons if len(p.vertices) < 3]
+        # Check for problematic faces in a single iteration
+        pole_faces = []
+        very_small_faces = []
+        for p in mesh.polygons:
+            if len(p.vertices) < 3:
+                pole_faces.append(p)
+            elif p.area < 0.000001:
+                very_small_faces.append(p)
+                
         if pole_faces:
             debug_print(f"Found {len(pole_faces)} degenerate faces (poles), these will be skipped")
-            
-        # For cubes and other primitives - check for extremely thin faces
-        very_small_faces = [p for p in mesh.polygons if p.area < 0.000001]
         if very_small_faces:
             debug_print(f"Found {len(very_small_faces)} very small faces, these will be skipped")
             
@@ -515,31 +552,94 @@ def ensure_geometry_compatibility(obj):
         
     except Exception as e:
         return False, f"Geometry check failed: {str(e)}"
+    finally:
+        # Restore original state
+        try:
+            if original_active:
+                bpy.context.view_layer.objects.active = original_active
+            if original_mode != 'EDIT' and obj.mode == 'EDIT':
+                bpy.ops.object.mode_set(mode=original_mode)
+        except Exception as restore_error:
+            debug_print(f"Warning: Could not restore original state: {restore_error}")
 
 def get_selected_faces(obj, max_faces=MAX_ALLOWED_FACES):
-    """Get selected faces from object with reliable detection"""
+    """Get selected faces from object with reliable detection and version compatibility"""
     selected_faces = []
     debug_print(f"Getting selected faces for {obj.name}")
     bm = None
+    
+    # Detect Blender version for compatibility
+    blender_version = bpy.app.version
+    debug_print(f"Blender version: {blender_version}")
     
     try:
         # Ensure we're in edit mode
         if obj.mode != 'EDIT':
             bpy.ops.object.mode_set(mode='EDIT')
             
-        # Get bmesh from edit mesh
-        mesh = obj.data
-        bm = bmesh.from_edit_mesh(mesh)
-        ensure_bmesh_lookup_tables(bm)
-        
-        # Simple and reliable selection check
-        selected_faces = [f for f in bm.faces if f.select and validate_face(f)]
-        debug_print(f"Found {len(selected_faces)} selected faces")
+        # Primary method: Modern bmesh approach (Blender 4.0+)
+        try:
+            mesh = obj.data
+            bm = bmesh.from_edit_mesh(mesh)
+            ensure_bmesh_lookup_tables(bm)
+            
+            # Primary selection detection
+            selected_faces = [f for f in bm.faces if f.select and validate_face(f)]
+            debug_print(f"Primary method: Found {len(selected_faces)} selected faces")
+            
+        except Exception as bmesh_error:
+            debug_print(f"Primary bmesh method failed: {bmesh_error}")
+            
+            # Fallback method 1: Alternative bmesh creation
+            try:
+                bm = bmesh.new()
+                bm.from_mesh(mesh)
+                bm.faces.ensure_lookup_table()
+                
+                # For fallback, we need to check selection differently
+                # Check if any faces were selected before entering edit mode
+                if hasattr(mesh, 'polygons'):
+                    selected_indices = [i for i, p in enumerate(mesh.polygons) if p.select]
+                    selected_faces = [bm.faces[i] for i in selected_indices if i < len(bm.faces) and validate_face(bm.faces[i])]
+                    debug_print(f"Fallback method 1: Found {len(selected_faces)} selected faces")
+                else:
+                    selected_faces = []
+                    
+            except Exception as fallback1_error:
+                debug_print(f"Fallback method 1 failed: {fallback1_error}")
+                
+                # Fallback method 2: Legacy polygon selection (older Blender versions)
+                try:
+                    if hasattr(mesh, 'polygons'):
+                        # Create new bmesh for processing
+                        bm = bmesh.new()
+                        bm.from_mesh(mesh)
+                        bm.faces.ensure_lookup_table()
+                        
+                        # Use all faces if selection detection fails
+                        selected_faces = [f for f in bm.faces if validate_face(f)]
+                        debug_print(f"Fallback method 2: Using all {len(selected_faces)} valid faces")
+                    else:
+                        selected_faces = []
+                        
+                except Exception as fallback2_error:
+                    debug_print(f"Fallback method 2 failed: {fallback2_error}")
+                    selected_faces = []
         
         # Apply maximum face limit for safety
         if max_faces > 0 and len(selected_faces) > max_faces:
             debug_print(f"Limiting selection from {len(selected_faces)} to {max_faces}")
             selected_faces = selected_faces[:max_faces]
+        
+        # Final validation: ensure we have a valid bmesh object
+        if bm is None:
+            try:
+                mesh = obj.data
+                bm = bmesh.from_edit_mesh(mesh)
+                ensure_bmesh_lookup_tables(bm)
+            except Exception:
+                bm = bmesh.new()
+                bm.from_mesh(obj.data)
         
         return selected_faces, bm
         
@@ -1108,10 +1208,14 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             
             # Clear cache if it's grown too large to prevent memory issues
             global FRACTAL_CACHE, FRACTAL_CACHE_HITS
-            if len(FRACTAL_CACHE) > FRACTAL_CACHE_SIZE * 1.5:
-                debug_print(f"Clearing fractal cache (size: {len(FRACTAL_CACHE)}, hits: {FRACTAL_CACHE_HITS})")
-                FRACTAL_CACHE.clear()
-                FRACTAL_CACHE_HITS = 0
+            # More efficient cache management - partial eviction instead of full clear
+            if len(FRACTAL_CACHE) > FRACTAL_CACHE_SIZE * 1.2:
+                debug_print(f"Performing partial cache eviction (size: {len(FRACTAL_CACHE)}, hits: {FRACTAL_CACHE_HITS})")
+                # Remove approximately 25% of cache entries
+                keys_to_remove = list(FRACTAL_CACHE.keys())[:len(FRACTAL_CACHE) // 4]
+                for key in keys_to_remove:
+                    FRACTAL_CACHE.pop(key, None)
+                debug_print(f"Cache size after eviction: {len(FRACTAL_CACHE)}")
             
             # Call appropriate fractal calculation function with optimized dispatch
             if fractal_type == 'MANDELBROT':
@@ -1881,10 +1985,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 xy_dist = math.sqrt(px*px + py*py)
                 
                 # theta: angle from z-axis
-                if r == 0:
-                    theta = 0
-                else:
-                    theta = math.acos(pz / r)
+                theta = math.acos(pz / r)
                     
                 # phi: angle in xy-plane
                 if xy_dist == 0:
@@ -2067,10 +2168,9 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
                 time_in_batch = time.time() - batch_start_time
                 if time_in_batch > MAX_BATCH_PROCESSING_TIME:
                     debug_print(f"Batch taking too long ({time_in_batch:.2f}s), deferring remaining faces to next batch")
-                    # Move remaining faces to a new batch at the end
-                    remaining_faces = []
-                    for remaining_group in face_group:
-                        remaining_faces.extend(remaining_group)
+                    # Move remaining faces to a new batch at the end using efficient flattening
+                    import itertools
+                    remaining_faces = list(itertools.chain.from_iterable(face_group))
                     if remaining_faces:
                         self.face_batches.append(remaining_faces)
                     break
@@ -2246,7 +2346,7 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
             
             # If we have too few valid faces, process as one group
             if len(face_centers) < 10:
-                valid_faces = [f for f, _ in face_centers]
+                valid_faces = [f for f, _ in face_centers] if face_centers else []
                 return [valid_faces] if valid_faces else [faces]
             
             # Choose grouping strategy based on number of faces to optimize
@@ -2309,9 +2409,10 @@ class MESH_OT_fractal_generate(bpy.types.Operator):
         
     def _group_by_kmeans(self, face_centers, k):
         """Group faces using a simplified K-means inspired clustering"""
-        # Extract all faces and centers
-        faces = [f for f, _ in face_centers]
-        centers = [c for _, c in face_centers]
+        # Extract all faces and centers using more memory-efficient approach
+        faces, centers = zip(*face_centers) if face_centers else ([], [])
+        faces = list(faces)
+        centers = list(centers)
         
         # Handle edge cases
         if len(centers) <= k:
